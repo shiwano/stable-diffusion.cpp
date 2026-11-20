@@ -6,6 +6,13 @@ var {
 
 {% include "video_helpers" %}
 
+fn h3_guide_pixels(clip, width, height, size) {
+    pixels = image::to_f32(clip, channels = 3)
+    resized = tensor::interpolate(pixels, size = size, axes = [0, 1], mode = "lanczos")
+    start = [math::floor((size[0] - width) / 2), math::floor((size[1] - height) / 2)]
+    return tensor::crop(resized, axes = [0, 1], start = start, size = [width, height])
+}
+
 fn main({{inputs}}) {
     base_model = load_dit(model_path{{model_options}})
     base_text = load_text_encoder(text_path{{text_options}})

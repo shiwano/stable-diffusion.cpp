@@ -79,11 +79,14 @@ namespace sd::dgl {
         auto& engine     = *object<AudioVAE>(args, "vae");
         Model::ExecutionScope scope(engine);
         scope.require_ready();
-        auto waveform = sd::dgl::ops::prepare_minimax_h3_reference_waveform(audio, engine.audio_vae_model->input_sample_rate());
+        const auto limit = get_int(args, "max_latents");
+        auto waveform = sd::dgl::ops::prepare_minimax_h3_reference_waveform(audio, engine.audio_vae_model->input_sample_rate(), limit);
         auto result   = engine.audio_vae_model->encode(engine.n_threads, waveform);
         if (result.empty()) {
             throw std::runtime_error("audio VAE encoding failed");
         }
+        if (limit > 0 && result.shape()[0] > limit)
+            result = sd::ops::slice(result, 0, 0, limit);
         return tensor_value(std::move(result));
     }
 

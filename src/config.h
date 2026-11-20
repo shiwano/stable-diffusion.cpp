@@ -179,6 +179,14 @@ namespace sd {
         sd::Image end_image{};
         sd::Image* ref_images{};
         int ref_images_count{};
+        sd::ReferenceVideo* guide_videos{};
+        int guide_videos_count{};
+        int* guide_video_indices{};
+        int guide_video_indices_count{};
+        sd::Audio* guide_audios{};
+        int guide_audios_count{};
+        int* guide_audio_indices{};
+        int guide_audio_indices_count{};
         sd::ReferenceVideo* ref_videos{};
         int ref_videos_count{};
         sd::Audio* ref_audios{};

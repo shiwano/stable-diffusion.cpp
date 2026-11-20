@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -1367,6 +1368,27 @@ ArgOptions SDGenerationParams::get_options() {
         return 1;
     };
 
+    auto on_guide_arg = [&](int argc, const char** argv, int index) {
+        bool audio = std::string(argv[index]) == "--guide-audio";
+        if (++index >= argc) {
+            return -1;
+        }
+        auto arg = argv_to_utf8(index, argv);
+        auto at = arg.rfind('@');
+        int32_t frame;
+        if (at == std::string::npos || at == 0) {
+            return -1;
+        }
+        const char* end = arg.data() + arg.size();
+        auto parsed = std::from_chars(arg.data() + at + 1, end, frame);
+        if (parsed.ec != std::errc() || parsed.ptr != end) {
+            return -1;
+        }
+        (audio ? guide_audio_paths : guide_video_paths).push_back(arg.substr(0, at));
+        (audio ? guide_audio_indices : guide_video_indices).push_back(frame);
+        return 1;
+    };
+
     auto on_ref_video_arg = [&](int argc, const char** argv, int index) {
         if (++index >= argc) {
             return -1;
@@ -1562,6 +1584,8 @@ ArgOptions SDGenerationParams::get_options() {
          "--hires-sigmas",
          "custom sigma values for the highres fix second pass, comma-separated (e.g., \"0.85,0.725,0.421875,0.0\") or preset: qwen-image-2.1-turbo, p-h3-image, minimax-h3-image, hyperflow-h3-flash-4, hyperflow-h3-flash-6, hyperflow-h3-flash-8.",
          on_hires_sigmas_arg},
+        {"", "--guide-image", "MiniMax-H3 image or frame directory: PATH@FRAME (repeatable)", on_guide_arg},
+        {"", "--guide-audio", "MiniMax-H3 WAV guide: PATH@FRAME (repeatable)", on_guide_arg},
         {"-r",
          "--ref-image",
          "reference image for Flux Kontext or MiniMax-H3 Ref2VA (can be used multiple times)",
@@ -1802,10 +1826,24 @@ static bool parse_audio_array_json_field(const json& parent,
     return true;
 }
 
+size_t minimax_h3_guide_frame_count(size_t available) {
+    return available < 5 ? std::min<size_t>(available, 1) : available - (available - 5) % 17;
+}
+
+void normalize_guide_frame_rgb(SDImage& image) {
+    if (image.channel == 4) {
+        for (size_t pixel = 0; pixel < size_t(image.width) * image.height; ++pixel) {
+            std::memmove(image.data + pixel * 3, image.data + pixel * 4, 3);
+        }
+        image.channel = 3;
+    }
+}
+
 /** Parses a JSON array of per-video base64 frame arrays into owned videos. */
 static bool parse_video_array_json_field(const json& parent,
                                          const char* key,
-                                         std::vector<std::vector<SDImageOwner>>& out_videos) {
+                                         std::vector<std::vector<SDImageOwner>>& out_videos,
+                                         bool visual_guide = false) {
     if (!parent.contains(key)) {
         return true;
     }
@@ -1823,13 +1861,18 @@ static bool parse_video_array_json_field(const json& parent,
             return false;
         }
         std::vector<SDImageOwner> frames;
-        for (const auto& frame : video) {
+        size_t count = visual_guide ? minimax_h3_guide_frame_count(video.size()) : video.size();
+        for (size_t i = 0; i < count; ++i) {
+            const auto& frame = video[i];
             if (!frame.is_string()) {
                 return false;
             }
             SDImageOwner image;
             if (!decode_base64_image(frame.get<std::string>(), 0, 0, 0, image)) {
                 return false;
+            }
+            if (visual_guide) {
+                normalize_guide_frame_rgb(image.get());
             }
             frames.push_back(std::move(image));
         }
@@ -2117,7 +2160,31 @@ bool SDGenerationParams::from_json_str(
         !load_image("ip_adapter_image", 3, ip_adapter_image)) {
         return false;
     }
-    if (!parse_image_array_json_field(j, "ref_images", 0, ref_images) ||
+    auto read_guide_indices = [&](const char* key, std::vector<int32_t>& indices) {
+        if (!j.contains(key)) {
+            return true;
+        }
+        if (j.at(key).is_null()) {
+            indices.clear();
+            return true;
+        }
+        if (!j.at(key).is_array()) {
+            return false;
+        }
+        indices.clear();
+        for (const auto& index : j.at(key)) {
+            if (!index.is_number_integer() || index.get<double>() < INT32_MIN || index.get<double>() > INT32_MAX) {
+                return false;
+            }
+            indices.push_back(index.get<int32_t>());
+        }
+        return true;
+    };
+    if (!parse_video_array_json_field(j, "guide_videos", guide_videos, true) ||
+        !parse_audio_array_json_field(j, "guide_audios", guide_audios) ||
+        !read_guide_indices("guide_video_indices", guide_video_indices) ||
+        !read_guide_indices("guide_audio_indices", guide_audio_indices) ||
+        !parse_image_array_json_field(j, "ref_images", 0, ref_images) ||
         !parse_image_array_json_field(j, "control_frames", 3, control_frames) ||
         !parse_audio_array_json_field(j, "ref_audios", ref_audios) ||
         !parse_audio_array_json_field(j, "ref_video_audios", ref_video_audios) ||
@@ -2380,7 +2447,12 @@ bool SDGenerationParams::validate(SDMode mode) {
         return false;
     }
 
-    if (mode != VID_GEN && (!ref_video_paths.empty() || !ref_video_audio_paths.empty() || !ref_audio_paths.empty() ||
+    if (guide_video_indices.size() != guide_video_paths.size() + guide_videos.size() ||
+        guide_audio_indices.size() != guide_audio_paths.size() + guide_audios.size()) {
+        LOG_ERROR("each guide requires one frame index");
+        return false;
+    }
+    if (mode != VID_GEN && (!guide_video_indices.empty() || !guide_audio_indices.empty() || !ref_video_paths.empty() || !ref_video_audio_paths.empty() || !ref_audio_paths.empty() ||
                             !ref_videos.empty() || !ref_video_audios.empty() || !ref_audios.empty())) {
         LOG_ERROR("error: reference video and audio inputs require vid_gen mode");
         return false;
@@ -2631,6 +2703,22 @@ SDOptPtr SDGenerationParams::to_video_opt() {
         opt.set_bool("circular_y", circular_y);
     opt.set_loras("loras", lora_vec.data(), lora_vec.size());
     opt.set_images("ref_images", ref_image_views.data(), ref_image_views.size());
+    std::vector<std::vector<SDImage>> guide_frames(guide_videos.size());
+    std::vector<SDReferenceVideo> videos;
+    for (size_t i = 0; i < guide_videos.size(); ++i) {
+        for (const auto& frame : guide_videos[i]) {
+            guide_frames[i].push_back(frame.get());
+        }
+        videos.push_back({guide_frames[i].data(), static_cast<int>(guide_frames[i].size()), 24, {}});
+    }
+    std::vector<SDAudio> audios;
+    for (auto& audio : guide_audios) {
+        audios.push_back(audio.get());
+    }
+    opt.set_videos("guide_videos", videos.data(), videos.size());
+    opt.set_audios("guide_audios", audios.data(), audios.size());
+    opt.set_ints("guide_video_indices", guide_video_indices.data(), guide_video_indices.size());
+    opt.set_ints("guide_audio_indices", guide_audio_indices.data(), guide_audio_indices.size());
     opt.set_videos("ref_videos", ref_video_views.data(), ref_video_views.size());
     opt.set_audios("ref_audios", ref_audio_views.data(), ref_audio_views.size());
     opt.set_frames("control_frames", control_frame_views.data(), control_frame_views.size());

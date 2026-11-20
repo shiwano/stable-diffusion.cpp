@@ -1098,7 +1098,6 @@ namespace MiniMaxH3 {
                 }
                 cursor += video_span(t);
             }
-            return cursor;
         };
         auto append_audio_positions = [&](int64_t length,
                                           float cursor,
@@ -1113,6 +1112,18 @@ namespace MiniMaxH3 {
         };
 
         float cursor = static_cast<float>(text_len);
+        auto reference_end = [&](const MiniMaxH3ReferenceBlock& block, float start) {
+            float end = block.kind == MiniMaxH3ReferenceKind::IMAGE ? start + 1.f : start;
+            if (block.video_index >= 0 && block.kind != MiniMaxH3ReferenceKind::IMAGE) {
+                for (int64_t t = 0; t < condition_videos[block.video_index].shape()[2]; ++t) {
+                    end += video_span(t);
+                }
+            }
+            if (block.audio_index >= 0) {
+                end = std::max(end, start + static_cast<float>(condition_audios[block.audio_index].shape()[0]));
+            }
+            return end;
+        };
         if (reference_blocks.empty()) {
             float video_duration = 0.f;
             for (int64_t t = 0; t < latent_t; ++t) {
@@ -1140,60 +1151,63 @@ namespace MiniMaxH3 {
                 layout.segments.push_back({row, row + count, condition_time_row * 3});
                 row += count;
             }
-        } else {
-            for (const auto& block : reference_blocks) {
-                const sd::Tensor<float>* ref_video = nullptr;
-                const sd::Tensor<float>* ref_audio = nullptr;
-                if (block.video_index >= 0) {
-                    GGML_ASSERT(block.video_index < static_cast<int32_t>(condition_videos.size()));
-                    ref_video = &condition_videos[static_cast<size_t>(block.video_index)];
-                }
-                if (block.audio_index >= 0) {
-                    GGML_ASSERT(block.audio_index < static_cast<int32_t>(condition_audios.size()));
-                    ref_audio = &condition_audios[static_cast<size_t>(block.audio_index)];
-                }
+        }
+        float target_start = cursor;
+        for (const auto& block : reference_blocks) {
+            GGML_ASSERT(block.video_index < static_cast<int32_t>(condition_videos.size()));
+            GGML_ASSERT(block.audio_index < static_cast<int32_t>(condition_audios.size()));
+            if (block.frame_index < 0) {
+                target_start = reference_end(block, target_start);
+            }
+        }
+        for (const auto& block : reference_blocks) {
+            const sd::Tensor<float>* ref_video = nullptr;
+            const sd::Tensor<float>* ref_audio = nullptr;
+            if (block.video_index >= 0) {
+                ref_video = &condition_videos[static_cast<size_t>(block.video_index)];
+            }
+            if (block.audio_index >= 0) {
+                ref_audio = &condition_audios[static_cast<size_t>(block.audio_index)];
+            }
 
-                float block_end = cursor;
-                if (block.kind == MiniMaxH3ReferenceKind::AUDIO ||
-                    block.kind == MiniMaxH3ReferenceKind::VIDEO_AUDIO) {
-                    GGML_ASSERT(ref_audio != nullptr);
-                    float w_low  = w_axis.front();
-                    float w_high = w_axis.back();
-                    if (ref_video != nullptr) {
-                        auto axes = condition_spatial_axes(*ref_video);
-                        w_low     = axes.second.front();
-                        w_high    = axes.second.back();
-                    }
-                    int64_t count = ref_audio->shape()[0] * 2;
-                    append_audio_positions(ref_audio->shape()[0], cursor, w_low, w_high);
-                    layout.sequence_segments.push_back({row,
-                                                        row + count,
-                                                        SequenceKind::CONDITION_AUDIO,
-                                                        block.audio_index});
-                    layout.segments.push_back({row,
-                                               row + count,
-                                               audio_condition_time_row * 3 + 2});
-                    row += count;
-                    block_end = std::max(block_end, cursor + static_cast<float>(ref_audio->shape()[0]));
+            float start = block.frame_index < 0 ? cursor : target_start + FRAME_RESCALE * block.frame_index;
+            if (block.kind == MiniMaxH3ReferenceKind::AUDIO ||
+                block.kind == MiniMaxH3ReferenceKind::VIDEO_AUDIO) {
+                GGML_ASSERT(ref_audio != nullptr);
+                float w_low  = w_axis.front();
+                float w_high = w_axis.back();
+                if (ref_video != nullptr) {
+                    auto axes = condition_spatial_axes(*ref_video);
+                    w_low     = axes.second.front();
+                    w_high    = axes.second.back();
                 }
+                int64_t count = ref_audio->shape()[0] * 2;
+                append_audio_positions(ref_audio->shape()[0], start, w_low, w_high);
+                layout.sequence_segments.push_back({row,
+                                                    row + count,
+                                                    SequenceKind::CONDITION_AUDIO,
+                                                    block.audio_index});
+                layout.segments.push_back({row,
+                                           row + count,
+                                           audio_condition_time_row * 3 + 2});
+                row += count;
+            }
 
-                if (block.kind != MiniMaxH3ReferenceKind::AUDIO) {
-                    GGML_ASSERT(ref_video != nullptr);
-                    auto axes       = condition_spatial_axes(*ref_video);
-                    int64_t count   = ref_video->shape()[2] *
-                                      static_cast<int64_t>(axes.first.size() * axes.second.size());
-                    float video_end = append_video_positions(*ref_video, cursor);
-                    layout.sequence_segments.push_back({row,
-                                                        row + count,
-                                                        SequenceKind::CONDITION_VIDEO,
-                                                        block.video_index});
-                    layout.segments.push_back({row, row + count, condition_time_row * 3});
-                    row += count;
-                    block_end = block.kind == MiniMaxH3ReferenceKind::IMAGE
-                                    ? std::max(block_end, cursor + 1.f)
-                                    : std::max(block_end, video_end);
-                }
-                cursor = block_end;
+            if (block.kind != MiniMaxH3ReferenceKind::AUDIO) {
+                GGML_ASSERT(ref_video != nullptr);
+                auto axes       = condition_spatial_axes(*ref_video);
+                int64_t count   = ref_video->shape()[2] *
+                                  static_cast<int64_t>(axes.first.size() * axes.second.size());
+                append_video_positions(*ref_video, start);
+                layout.sequence_segments.push_back({row,
+                                                    row + count,
+                                                    SequenceKind::CONDITION_VIDEO,
+                                                    block.video_index});
+                layout.segments.push_back({row, row + count, condition_time_row * 3});
+                row += count;
+            }
+            if (block.frame_index < 0) {
+                cursor = reference_end(block, cursor);
             }
         }
 

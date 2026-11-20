@@ -1304,7 +1304,8 @@ video::save("output.avi", video, audio = track)
 
 `encode_audio(encoder, samples, sample_rate=...)` and
 `audio_vae_encode(vae, samples, sample_rate=...)` accept tensors and an explicit
-sample rate. Their existing model-specific resampling remains in effect.
+sample rate. On MiniMax-H3, pass `max_latents` to `audio_vae_encode` to encode
+only the requested prefix. The default, 0, encodes the full input.
 `audio_vae_decode` reports the decoder's actual output sample rate.
 
 ## Regions and masks
@@ -1562,6 +1563,8 @@ Each block has a `kind` of `image`, `video`, `audio` or `video_audio`.
 `image` and `video` require a `video` index into `ref_latents`; `audio` requires
 an `audio` index into `ref_audios`; `video_audio` requires both. Indices are
 zero-based nonnegative integers, and list order determines reference order.
+Set a block's optional `frame_index` to anchor it to a zero-based output frame.
+Blocks without this field precede the output timeline.
 If `ref_latents` is empty, video indices refer to the condition's `ref_images`.
 The explicit argument overrides the condition field, including an empty list.
 Malformed blocks or out-of-range indices fail when constructing the predictor,

@@ -1,5 +1,5 @@
 {% if encode_audio %}
-    {{name}} = audio_vae_encode(audio_vae, {{name}}_samples, sample_rate = {{sample_rate}})
+    {{name}} = audio_vae_encode(audio_vae, {{name}}_samples, sample_rate = {{sample_rate}}, max_latents = {{limit}})
 {% else %}
 {% if resize_video %}
     {{source}}_pixels = image::to_f32(tensor::interpolate(tensor::index_select({{source}}, axis = 3, indices = {{indices}}), size = [{{width}}, {{height}}], axes = [1, 2]), channels = 3)

@@ -99,6 +99,7 @@ struct MiniMaxH3ReferenceBlock {
     MiniMaxH3ReferenceKind kind = MiniMaxH3ReferenceKind::IMAGE;
     int32_t video_index         = -1;
     int32_t audio_index         = -1;
+    int32_t frame_index         = -1;
 };
 
 struct MiniMaxH3DiffusionExtra {

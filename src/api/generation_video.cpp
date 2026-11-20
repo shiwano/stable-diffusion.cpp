@@ -103,6 +103,11 @@ namespace sd::api {
         const bool frozen    = (version == VERSION_WAN2_2_TI2V || sd_version_is_lingbot_video(version)) && (first || last);
         const bool ltx       = sd_version_is_ltxav(version);
         const bool h3        = version == VERSION_MINIMAX_H3;
+        if (request.video->guide_videos_count != request.video->guide_video_indices_count ||
+            request.video->guide_audios_count != request.video->guide_audio_indices_count)
+            throw dgl::Error(SD_STATUS_INVALID_ARGUMENT, "each MiniMax-H3 guide requires one frame index");
+        if (!h3 && (request.video->guide_videos_count || request.video->guide_audios_count))
+            throw dgl::Error(SD_STATUS_UNSUPPORTED, "frame-indexed guides require MiniMax-H3");
         if (!h3 && !bound_videos(request.options, "ref_videos").empty())
             throw dgl::Error(SD_STATUS_UNSUPPORTED, "reference videos require MiniMax-H3");
         if (!h3 && !s2v && !bound_audios(request.options, "ref_audios").empty())

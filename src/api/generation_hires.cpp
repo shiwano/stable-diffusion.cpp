@@ -23,6 +23,9 @@ namespace sd::api {
         const bool pixels  = !request.video && (model || mode == "lanczos" || mode == "nearest");
         const auto version = request.definition.version;
         const bool ltx     = sd_version_is_ltxav(version);
+        if (request.video && version == VERSION_MINIMAX_H3 &&
+            (bound_tensor(request.options, "init_image") || bound_tensor(request.options, "end_image") || !bound_videos(request.options, "guide_videos").empty()))
+            throw dgl::Error(SD_STATUS_UNSUPPORTED, "MiniMax-H3 hires does not support visual guides");
         if (request.video && !ltx && version != VERSION_MINIMAX_H3)
             throw dgl::Error(SD_STATUS_UNSUPPORTED, "video hires supports LTX and MiniMax-H3; other workflows can be written in DGL");
         if (request.video && (mode == "lanczos" || mode == "nearest"))

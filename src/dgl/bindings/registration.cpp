@@ -653,7 +653,7 @@ namespace sd::dgl {
             {required("upscaler", Kind::LatentUpscaler), required("latent", Kind::Tensor), std::move(width), std::move(height)},
             {Kind::Tensor}, upscale_latent);
         registry["audio_vae_encode"] = make_operation(
-            {required("vae", Kind::AudioVAE), required("samples", Kind::Tensor), integer("sample_rate", 1000, 384000)}, {Kind::Tensor}, audio_vae_encode);
+            {required("vae", Kind::AudioVAE), required("samples", Kind::Tensor), integer("sample_rate", 1000, 384000), integer("max_latents", 0, INT32_MAX, 0)}, {Kind::Tensor}, audio_vae_encode);
         registry["audio_vae_decode"] = make_operation(
             {required("vae", Kind::AudioVAE), required("latent", Kind::Tensor)}, audio_signature(), audio_vae_decode);
     }

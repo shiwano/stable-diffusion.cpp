@@ -422,6 +422,10 @@ For SDXL's bundled VAE (no `vae_path`), generation emits
 | `flash_attn_mode` | `string` | context |
 | `force_sdxl_vae_conv_scale` | `bool` | context |
 | `fps` | `int` | video |
+| `guide_audio_indices` | `ints` | video |
+| `guide_audios` | `audios` | video |
+| `guide_video_indices` | `ints` | video |
+| `guide_videos` | `videos` | video |
 | `height` | `int` | image, video |
 | `high_noise_diffusion_model_path` | `string` | context |
 | `image` | `tensor` | upscale |

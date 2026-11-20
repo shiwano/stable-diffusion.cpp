@@ -128,13 +128,16 @@ namespace sd::dgl::ops {
     }
 
     sd::Tensor<float> prepare_minimax_h3_reference_waveform(const sd::Audio& audio,
-                                                            int target_sample_rate) {
+                                                            int target_sample_rate, int64_t max_latents) {
         if (audio.data == nullptr || audio.sample_count == 0 || audio.channels == 0 || audio.sample_rate == 0) {
             return {};
         }
         uint64_t output_samples = static_cast<uint64_t>(std::llround(
             static_cast<long double>(audio.sample_count) * target_sample_rate / audio.sample_rate));
         output_samples          = std::max<uint64_t>(1, output_samples);
+        // The encoder receptive field for latent i ends at sample 800*i + 9924.
+        if (max_latents > 0)
+            output_samples = std::min<uint64_t>(output_samples, 800 * (max_latents - 1) + 9925);
         uint64_t padded_samples = (output_samples + 799) / 800 * 800;
         // Keep stereo streams planar for the mono-per-stream audio encoder:
         // [samples, 1, stereo, batch]. This avoids flattening interleaved L/R

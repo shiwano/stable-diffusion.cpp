@@ -108,6 +108,8 @@ namespace sd::dgl {
                 fields.emplace("video", Value::literal(block.video_index));
             if (block.kind == MiniMaxH3ReferenceKind::AUDIO || block.kind == MiniMaxH3ReferenceKind::VIDEO_AUDIO)
                 fields.emplace("audio", Value::literal(block.audio_index));
+            if (block.frame_index >= 0)
+                fields.emplace("frame_index", Value::literal(block.frame_index));
             blocks.push_back(Value::dict(std::move(fields)));
         }
         return Value::list(std::move(blocks), Kind::Dict);
@@ -151,8 +153,10 @@ namespace sd::dgl {
             };
             block.video_index = index("video", block.kind != MiniMaxH3ReferenceKind::AUDIO);
             block.audio_index = index("audio", block.kind == MiniMaxH3ReferenceKind::AUDIO || block.kind == MiniMaxH3ReferenceKind::VIDEO_AUDIO);
+            if (fields.count("frame_index"))
+                block.frame_index = index("frame_index", true);
             for (const auto& [field, entry] : fields)
-                if (field != "kind" && field != "video" && field != "audio")
+                if (field != "kind" && field != "video" && field != "audio" && field != "frame_index")
                     throw std::runtime_error(label + " has unknown field '" + field + "'");
             blocks.push_back(block);
         }
@@ -211,7 +215,7 @@ namespace sd::dgl {
         {"image_embed_indices", {Kind::List, Kind::Tensor}, image_embed_indices},
         tensor_list_field<&SDCondition::c_ref_images>("ref_images"),
         tensor_list_field<&SDCondition::c_ref_audios>("ref_audios"),
-        {"reference_blocks", {{Kind::List, Kind::Dict}, {{"kind", {Kind::String}}, {"video", {Kind::Integer}}, {"audio", {Kind::Integer}}}}, reference_blocks},
+        {"reference_blocks", {{Kind::List, Kind::Dict}, {{"kind", {Kind::String}}, {"video", {Kind::Integer}}, {"audio", {Kind::Integer}}, {"frame_index", {Kind::Integer}}}}, reference_blocks},
     };
 
     OutputSignature condition_signature() {

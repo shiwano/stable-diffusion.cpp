@@ -1435,6 +1435,8 @@ Compared with `img_gen`, the `vid_gen` request body:
 - `mask_image`, `control_image`, `control_strength`, `ip_adapter_image`, `ip_adapter_strength`, and `embed_image_metadata` are not part of the request schema
 - `ref_images` is accepted for MiniMax-H3 Ref2VA conditioning; other video model families currently ignore it
 - `vid_gen` adds `end_image`, `control_frames`, `high_noise_sample_params`, `video_frames`, `fps`, `moe_boundary`, and `vace_strength`
+- `guide_videos` accepts MiniMax-H3 visual guides as arrays of base64 frames. `guide_video_indices` supplies one signed target frame index per guide.
+- `guide_audios` accepts MiniMax-H3 audio guides as base64 WAV strings. `guide_audio_indices` supplies one signed target frame index per guide.
 
 Example:
 
@@ -1528,7 +1530,7 @@ Example:
 
 - `ref_images` contains reference images for MiniMax-H3 Ref2VA conditioning.
 - Images retain request order and correspond to `<Picture 1>`, `<Picture 2>`, and so on in the prompt.
-- For MiniMax-H3, non-empty `ref_images` cannot be combined with `init_image` or `end_image`. A conflicting API request fails during generation; the WebUI checks this before submission.
+- MiniMax-H3 accepts references together with frame-indexed guides, including `init_image` and `end_image`.
 - MiniMax-H3 does not support `control_frames`; leave that array empty.
 - Other video model families currently ignore `ref_images`.
 - `features_by_mode.vid_gen` does not currently advertise `ref_images`; its absence is not an indication that MiniMax-H3 reference images are unsupported.

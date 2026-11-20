@@ -16,15 +16,12 @@ namespace sd::api {
         const auto videos           = bound_videos(request.options, "ref_videos");
         const auto audios           = bound_audios(request.options, "ref_audios");
         const bool references       = !images.empty() || !videos.empty() || !audios.empty();
-        const bool audio_references = !audios.empty() || std::any_of(videos.begin(), videos.end(), [](const sd_video_t& video) { return video.audio.data != nullptr; });
-        if (audio_references && !request.flags.at("decode_audio").get<bool>())
-            throw dgl::Error(SD_STATUS_LOAD_FAILED, "MiniMax-H3 audio references require audio VAE weights");
-        if (references && (!first.empty() || !last.empty()))
-            throw dgl::Error(SD_STATUS_INVALID_ARGUMENT, "MiniMax-H3 references and start/end keyframes cannot be combined");
-        if (!references && first.empty() && last.empty())
+        const auto guide_videos = bound_videos(request.options, "guide_videos");
+        const auto guide_audios = bound_audios(request.options, "guide_audios");
+        if (!references && first.empty() && last.empty() && guide_videos.empty() && guide_audios.empty())
             return;
         auto& prepare = request.fields["references"];
-        std::vector<std::string> visuals, sounds, presentation, blocks, keys;
+        std::vector<std::string> visuals, sounds, presentation, blocks;
         const auto encode_visual = [&](const std::string& pixels, const nlohmann::json& options = nlohmann::json::object()) {
             const auto name = "h3_visual_" + std::to_string(visuals.size());
             nlohmann::json parameters{{"name", name}, {"pixels", pixels}, {"encode_audio", false}, {"resize_video", false}, {"resize_image", false}};
@@ -32,26 +29,63 @@ namespace sd::api {
             prepare += request.render("video_reference", parameters);
             visuals.push_back(name);
         };
-        const auto encode_sound = [&](const sd_audio_t& audio) {
+        const auto encode_sound = [&](const sd_audio_t& audio, int64_t limit = 0) {
+            if (!request.flags.at("decode_audio").get<bool>())
+                throw dgl::Error(SD_STATUS_LOAD_FAILED, "MiniMax-H3 audio conditioning requires audio VAE weights");
             const auto name = "h3_sound_" + std::to_string(sounds.size());
             bind_tensor(request.program, name + "_samples", audio.data);
             const auto media = "{samples = " + name + "_samples, sample_rate = " + std::to_string(audio.sample_rate) + "}";
-            prepare += request.render("video_reference", {{"encode_audio", true}, {"name", name}, {"sample_rate", audio.sample_rate}});
+            prepare += request.render("video_reference", {{"encode_audio", true}, {"name", name}, {"sample_rate", audio.sample_rate}, {"limit", limit}});
             sounds.push_back(name);
-            presentation.push_back("{audio = " + media + "}");
+            if (!limit)
+                presentation.push_back("{audio = " + media + "}");
         };
-        if (!references) {
-            std::vector<std::string> key_images;
-            for (const auto& [pixels, index] : std::vector<std::pair<std::string, std::string>>{{first, "0"}, {last, "frames - 1"}}) {
-                if (pixels.empty())
-                    continue;
-                encode_visual(pixels);
-                key_images.push_back(pixels + "[:, :, 0]");
-                keys.push_back(index);
-            }
+        const int frames = request.values.at("frames").get<int>();
+        std::vector<std::string> key_images;
+        for (const auto& [pixels, index] : std::vector<std::pair<std::string, int>>{{first, 0}, {last, frames - 1}}) {
+            if (pixels.empty())
+                continue;
+            blocks.push_back(literal({{"kind", "video"}, {"video", visuals.size()}, {"frame_index", index}}));
+            encode_visual(pixels);
+            key_images.push_back(pixels + "[:, :, 0]");
+        }
+        if (!references && !key_images.empty()) {
             request.fields["prompt_options"] += ", media = " + expression_list(key_images);
             request.fields["negative_prompt_options"] += ", media = " + expression_list(key_images);
         }
+        const auto resolve_index = [&](int index) {
+            if (index < 0)
+                index += frames;
+            if (index < 0 || index >= frames)
+                throw dgl::Error(SD_STATUS_INVALID_ARGUMENT, "MiniMax-H3 guide frame index outside target");
+            return index;
+        };
+        const auto guide_audio = [&](const sd_audio_t& audio, int start) {
+            blocks.push_back(literal({{"kind", "audio"}, {"audio", sounds.size()}, {"frame_index", start}}));
+            encode_sound(audio, std::llround(frames * (40.0 / 24)) - (5LL * start + 2) / 3);
+        };
+        for (size_t i = 0; i < guide_videos.size(); ++i) {
+            const auto& video = guide_videos[i];
+            const int start = resolve_index(request.video->guide_video_indices[i]);
+            const int64_t available = sd_tensor_dim(video.data, 3);
+            const int64_t count = available < 5 ? 1 : available - (available - 5) % 17;
+            if (available < 1 || video.fps != 24 || count > frames - start)
+                throw dgl::Error(SD_STATUS_INVALID_ARGUMENT, "MiniMax-H3 visual guide requires 24 fps frames that fit at the requested index");
+            const auto name = "guide_video_" + std::to_string(i);
+            bind_tensor(request.program, name, video.data);
+            blocks.push_back(literal({{"kind", "video"}, {"video", visuals.size()}, {"frame_index", start}}));
+            const auto channels = sd_tensor_dim(video.data, 0) == 2 ? ":1" : ":";
+            const auto clip = name + "[" + channels + ", :, :, :" + std::to_string(count) + "]";
+            const auto width = request.values.at("width").get<int>(), height = request.values.at("height").get<int>();
+            const auto w = sd_tensor_dim(video.data, 1), h = sd_tensor_dim(video.data, 2);
+            const auto scale = std::max(double(width) / w, double(height) / h);
+            const auto size = literal({int64_t(std::ceil(w * scale)), int64_t(std::ceil(h * scale))});
+            encode_visual("h3_guide_pixels(" + clip + ", width, height, " + size + ")");
+            if (video.audio.data)
+                guide_audio(video.audio, start);
+        }
+        for (size_t i = 0; i < guide_audios.size(); ++i)
+            guide_audio(guide_audios[i], resolve_index(request.video->guide_audio_indices[i]));
         for (size_t i = 0; i < images.size(); ++i) {
             const auto name = "h3_image_" + std::to_string(i);
             bind_tensor(request.program, name, images[i]);
@@ -105,8 +139,6 @@ namespace sd::api {
             options += ", ref_audios = " + expression_list(sounds);
         if (!blocks.empty())
             options += ", reference_blocks = " + expression_list(blocks);
-        if (!keys.empty())
-            options += ", keyframe_indices = " + expression_list(keys);
         request.fields["predictor_options"] += options;
         request.fields["negative_predictor_options"] += options;
         if (!presentation.empty()) {

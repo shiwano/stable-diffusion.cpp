@@ -23,7 +23,7 @@ namespace sd::dgl::ops {
                                                  int temporal_scale,
                                                  bool causal_temporal_positioning);
     sd::Tensor<float> prepare_minimax_h3_reference_waveform(const sd::Audio& audio,
-                                                            int target_sample_rate);
+                                                            int target_sample_rate, int64_t max_latents);
     sd::Tensor<float> build_s2v_audio_window(const sd::Tensor<float>& stacked, int64_t batch_frames);
 }  // namespace sd::dgl::ops
 

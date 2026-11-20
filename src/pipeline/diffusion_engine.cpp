@@ -1024,16 +1024,22 @@ void StableDiffusionGGML::configure_weight_loading() {
     const auto& model_loader  = model_manager->loader();
     const auto wtype_stat     = model_loader.get_wtype_stat();
     bool have_int8_tensorwise = false;
+    bool unsupported_immediate = false;
     bool have_quant_type_rule = false;
-    for (const auto& [_, tensor_storage] : model_loader.get_tensor_storage_map()) {
+    const auto& storages = model_loader.get_tensor_storage_map();
+    for (const auto& [name, tensor_storage] : storages) {
         if (tensor_storage.is_int8_tensorwise || tensor_storage.w4_convrot_kind) {
             have_int8_tensorwise = true;
         }
         if (tensor_storage.expected_type < GGML_TYPE_COUNT && ggml_is_quantized(tensor_storage.expected_type)) {
             have_quant_type_rule = true;
         }
-        if (have_int8_tensorwise && have_quant_type_rule) {
-            break;
+        if (tensor_storage.w4_convrot_kind) {
+            unsupported_immediate = true;
+        } else if (tensor_storage.is_int8_tensorwise) {
+            auto scale = storages.find(name + "_scale");
+            unsupported_immediate |= tensor_storage.n_dims != 2 || scale == storages.end() ||
+                                     scale->second.nelements() != tensor_storage.ne[1];
         }
     }
 
@@ -1056,9 +1062,9 @@ void StableDiffusionGGML::configure_weight_loading() {
             apply_lora_immediately = true;
         }
     } else if (sd_ctx_params->lora_apply_mode == LORA_APPLY_IMMEDIATELY) {
-        if (have_int8_tensorwise) {
+        if (unsupported_immediate) {
             LOG_WARN(
-                "ComfyUI INT8/packed INT4 weights do not support the immediately LoRA apply mode; "
+                "Immediate LoRA application requires per-row INT8 scales and does not support packed INT4; "
                 "using at_runtime instead");
             apply_lora_immediately = false;
         } else if (row_split_active()) {

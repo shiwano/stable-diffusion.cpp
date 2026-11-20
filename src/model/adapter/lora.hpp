@@ -953,17 +953,12 @@ struct LoraModel : public GGMLRunner {
         return out_diff;
     }
 
-    ggml_cgraph* build_lora_graph(const std::map<std::string, ggml_tensor*>& model_tensors,
-                                  const std::set<std::string>& model_tensor_names,
-                                  SDVersion version) {
+    ggml_cgraph* build_lora_graph(const std::map<std::string, ggml_tensor*>& model_tensors) {
         size_t lora_graph_size = LORA_GRAPH_BASE_SIZE + lora_tensors.size() * 10;
         ggml_cgraph* gf        = ggml_new_graph_custom(compute_ctx, lora_graph_size, false);
 
         auto runner_ctx = get_context();
-        preprocess_lora_tensors(model_tensor_names);
-
         original_tensor_to_final_tensor.clear();
-        applied_lora_tensors.clear();
 
         for (auto it : model_tensors) {
             std::string model_tensor_name = it.first;
@@ -1001,9 +996,45 @@ struct LoraModel : public GGMLRunner {
                const std::set<std::string>& model_tensor_names,
                SDVersion version,
                int n_threads,
-               bool warn_unused = true) {
+               bool warn_unused = true,
+               const std::map<std::string, int>& i8_groups = {}) {
+        applied_lora_tensors.clear();
+        preprocess_lora_tensors(model_tensor_names);
+        for (const auto& [name, group] : i8_groups) {
+            auto* weight = model_tensors.at(name);
+            model_tensors.erase(name);
+            const std::string prefix = "lora." + name + ".";
+            if (std::none_of(lora_tensors.begin(), lora_tensors.end(), [&](const auto& item) {
+                    return starts_with(item.first, prefix);
+                }))
+                continue;
+
+            auto scale = model_tensors.find(name + "_scale");
+            ggml_tensor* diff = nullptr;
+            auto build_diff = [&]() {
+                auto ctx = get_context();
+                auto* graph = new_graph_custom(LORA_GRAPH_BASE_SIZE + lora_tensors.size() * 10);
+                diff = get_weight_diff(name, &ctx, weight);
+                if (diff) {
+                    if (diff->type != GGML_TYPE_F32)
+                        diff = ggml_ext_cast_f32(&ctx, diff);
+                    if (!ggml_is_contiguous(diff))
+                        diff = ggml_cont(compute_ctx, diff);
+                    ggml_set_output(diff);
+                    ggml_build_forward_expand(graph, diff);
+                }
+                return graph;
+            };
+            bool merged = false;
+            auto merge = [&]() {
+                merged = !diff || merge_i8_weight_diff(weight, scale == model_tensors.end() ? nullptr : scale->second, diff, group);
+                return merged;
+            };
+            if (!compute(build_diff, n_threads, false, true, merge).has_value() || !merged)
+                return false;
+        }
         auto get_graph = [&]() -> ggml_cgraph* {
-            return build_lora_graph(model_tensors, model_tensor_names, version);
+            return build_lora_graph(model_tensors);
         };
         auto read_outputs = [&]() {
             for (const auto& item : original_tensor_to_final_tensor) {

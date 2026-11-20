@@ -640,6 +640,13 @@ bool ModelManager::stage_tensors_to_compute_backend(const std::vector<TensorStat
     return true;
 }
 
+static bool is_int8_weight_scale(const std::string& name, const String2TensorStorage& sources) {
+    if (!ends_with(name, ".weight_scale"))
+        return false;
+    auto weight = sources.find(name.substr(0, name.size() - 6));
+    return weight != sources.end() && weight->second.is_int8_tensorwise;
+}
+
 bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states) {
     if (loras_.empty() || applying_loras_)
         return true;
@@ -649,7 +656,38 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
         ~ApplyGuard() { active = false; }
     } guard{applying_loras_};
 
+    if (std::all_of(states.begin(), states.end(), [&](const TensorState* state) {
+            return state == nullptr || state->applied_lora_epoch == current_lora_epoch_;
+        }))
+        return true;
+
+    // Residency blocks can evict the weight and its row scales independently.
+    std::map<std::string, TensorState*> unpaired_scales;
+    for (auto* state : states) {
+        if (state && state->source_file == 0 && is_int8_weight_scale(state->name, model_loader_.get_tensor_storage_map()))
+            unpaired_scales.emplace(state->name, state);
+    }
+    std::map<TensorState*, TensorState*> scale_weights;
+    std::vector<TensorState*> reload;
+    for (auto* weight : states) {
+        if (!weight || weight->sources.empty() || !weight->sources.front().is_int8_tensorwise)
+            continue;
+        auto scale = unpaired_scales.find(weight->name + "_scale");
+        if (scale == unpaired_scales.end())
+            continue;
+        if (weight->applied_lora_epoch != scale->second->applied_lora_epoch) {
+            auto* merged = weight->applied_lora_epoch == current_lora_epoch_ ? weight : scale->second;
+            reload.push_back(merged);
+            merged->applied_lora_epoch = UINT64_MAX;
+        }
+        scale_weights.emplace(scale->second, weight);
+        unpaired_scales.erase(scale);
+    }
+    if (!reload.empty() && !load_tensors(reload))
+        return false;
+
     struct LoraApplyGroup {
+        std::map<std::string, int> i8_groups;
         std::map<std::string, ggml_tensor*> model_tensors;
         std::vector<TensorState*> states;
     };
@@ -661,7 +699,7 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
             state->component == ModelComponent::LatentUpsampler || model_sources_.count(state->source_file) != 0 || should_ignore(*state) || is_optional_missing_tensor(state->name)) {
             continue;
         }
-        if (state->applied_lora_epoch == current_lora_epoch_) {
+        if (state->applied_lora_epoch == current_lora_epoch_ || unpaired_scales.count(state->name)) {
             continue;
         }
         if (state->compute_backend == nullptr) {
@@ -683,8 +721,15 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
             LOG_ERROR("model manager lora target tensor '%s' is not prepared", state->name.c_str());
             return false;
         }
-        LoraApplyGroup& group            = groups[{state->compute_backend, state->params_backend, state->residency_mode}];
+        // A row scale follows its weight for merging even if only one was demoted to disk.
+        auto paired_weight = scale_weights.find(state);
+        const auto* target = paired_weight == scale_weights.end() ? state : paired_weight->second;
+        LoraApplyGroup& group = groups[{target->compute_backend, target->params_backend, target->residency_mode}];
         group.model_tensors[state->name] = state->tensor;
+        if (!state->sources.empty() && state->sources.front().is_int8_tensorwise) {
+            const auto& source = state->sources.front();
+            group.i8_groups[state->name] = source.int8_convrot ? source.int8_convrot_group_size : 0;
+        }
         group.states.push_back(state);
     }
 
@@ -694,20 +739,19 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
 
     std::set<std::string> all_tensor_names = tensor_names();
     for (auto& group_pair : groups) {
-        ggml_backend_t compute_backend = std::get<0>(group_pair.first);
+        const auto& [compute_backend, params_backend, residency_mode] = group_pair.first;
         LoraApplyGroup& group          = group_pair.second;
         for (const LoraSpec& lora_spec : loras_) {
             if (group.model_tensors.empty()) {
                 continue;
             }
 
-            std::string id     = lora_id(lora_spec);
-            const auto* target = group.states.front();
+            std::string id = lora_id(lora_spec);
             // The temporary runner is destroyed before this manager call returns.
             auto borrowed_manager = std::shared_ptr<ModelManager>(this, [](ModelManager*) {});
-            auto lora             = std::make_shared<LoraModel>(id, compute_backend, target->params_backend,
+            auto lora             = std::make_shared<LoraModel>(id, compute_backend, params_backend,
                                                                 borrowed_manager, lora_spec.file_id, lora_version_,
-                                                                target->residency_mode);
+                                                                residency_mode);
 
             LoraModel::filter_t lora_tensor_filter = nullptr;
             if (!lora_spec.tensor_name_prefix_filter.empty()) {
@@ -730,7 +774,7 @@ bool ModelManager::apply_loras_to_params(const std::vector<TensorState*>& states
                 continue;
             }
             lora->multiplier = lora_spec.multiplier;
-            if (!lora->apply(group.model_tensors, all_tensor_names, lora_version_, n_threads_, false))
+            if (!lora->apply(group.model_tensors, all_tensor_names, lora_version_, n_threads_, false, group.i8_groups))
                 return false;
             lora->release_loaded_tensors();
         }
@@ -872,6 +916,11 @@ bool ModelManager::mmap_params(const std::vector<TensorState*>& states,
 
 bool ModelManager::can_mmap_storage(const TensorState& state) const {
     if (state.sources.size() > 1 || state.source_file != 0 || !enable_mmap_ || state.residency_mode != ResidencyMode::ParamBackend) {
+        return false;
+    }
+    // The loader reuses the file mapping when an evicted weight/scale pair is merged again.
+    if (writable_mmap_ && !state.sources.empty() &&
+        (state.sources.front().is_int8_tensorwise || is_int8_weight_scale(state.name, model_loader_.get_tensor_storage_map()))) {
         return false;
     }
     if (state.compute_backend == nullptr || state.params_backend == nullptr) {

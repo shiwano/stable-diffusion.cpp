@@ -99,7 +99,9 @@ The packed runtime activation tensor contains the I8 activation rows and their f
 - MUSA shares the CUDA-style H256 activation kernels. INT8 GEMM falls back to CPU because the MUSA backend does not advertise INT8 BLAS support.
 - Vulkan provides H256 activation quantization and INT8 matrix multiplication when the build and device support accelerated packed INT8 dot products. Unsupported configurations and GPU backends without these kernels use the backend scheduler to fall back to CPU.
 
-LoRA adapters are applied at runtime without modifying the INT8 weights. The INT8 convrot path computes the base linear output, while LoRA, LoHa, LoKr, and raw weight-difference adapters compute their output corrections from the original, unrotated activation and add them to the base output. `--lora-apply-mode auto` selects this path for models containing INT8 tensorwise weights. If `immediately` is requested, sd.cpp falls back to runtime application because merging an adapter would require dequantizing and rotating its weight update, then recalculating the per-row scales and requantizing the result.
+By default, LoRA adapters are applied at runtime without modifying the INT8 weights. The INT8 convrot path computes the base linear output, while LoRA, LoHa, LoKr, and raw weight-difference adapters compute their output corrections from the original, unrotated activation and add them to the base output. `--lora-apply-mode auto` selects this path for models containing INT8 tensorwise weights.
+
+Use `--lora-apply-mode immediately` to merge the adapter into INT8 matrices with per-output-row scales before sampling. This mode rotates the weight update for convrot layers and requantizes each row. It removes the runtime adapter branch and introduces an additional INT8 rounding step. Checkpoints containing packed INT4 or INT8 matrices with a shared scale for multiple output rows use runtime application.
 
 The shared CUDA/HIP/MUSA convrot activation paths support H64 and H256. Vulkan also supports H64 activation quantization; its INT8 matrix multiplication path currently requires H256.
 

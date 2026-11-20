@@ -1,10 +1,60 @@
 #include "model/adapter/lora_ops.h"
 
+#include <algorithm>
 #include <cmath>
 
+#include "core/convrot.h"
 #include "core/ggml_extend.h"
 #include "core/ggml_extend_backend.h"
 #include "core/ggml_runner.h"
+
+bool merge_i8_weight_diff(ggml_tensor* weight, ggml_tensor* scales, ggml_tensor* diff, int group) {
+    const int64_t width = weight->ne[0];
+    const int64_t rows  = weight->ne[1];
+    if (weight->type != GGML_TYPE_I8 || ggml_n_dims(weight) > 2 || !ggml_is_contiguous(weight) ||
+        !scales || scales->type != GGML_TYPE_F32 || ggml_nelements(scales) != rows || !ggml_is_contiguous(scales) ||
+        !ggml_are_same_shape(weight, diff) || diff->type != GGML_TYPE_F32 || !ggml_is_contiguous(diff) ||
+        (group && width % group != 0)) {
+        LOG_ERROR("invalid INT8 LoRA merge layout for %s", weight->name);
+        return false;
+    }
+
+    const int64_t block_rows = std::min(rows, std::max<int64_t>(1, (1 << 20) / width));
+    std::vector<int8_t> quant(block_rows * width);
+    std::vector<float> delta(block_rows * width);
+    std::vector<float> scale(block_rows);
+    for (int64_t start = 0; start < rows; start += block_rows) {
+        const int64_t count = std::min(block_rows, rows - start);
+        ggml_backend_tensor_get(weight, quant.data(), start * width, count * width);
+        ggml_backend_tensor_get(diff, delta.data(), start * width * sizeof(float), count * width * sizeof(float));
+        ggml_backend_tensor_get(scales, scale.data(), start * sizeof(float), count * sizeof(float));
+        for (int64_t r = 0; r < count; ++r) {
+            auto* row = delta.data() + r * width;
+            auto* q   = quant.data() + r * width;
+            if (std::all_of(row, row + width, [](float value) { return value == 0.f; }))
+                continue;
+            if (group) {
+                for (int64_t col = 0; col < width; col += group)
+                    convrot_transform(row + col, group);
+            }
+            float peak = 0.f;
+            for (int64_t col = 0; col < width; ++col) {
+                row[col] += q[col] * scale[r];
+                if (!std::isfinite(row[col])) {
+                    LOG_ERROR("non-finite INT8 LoRA merge result for %s", weight->name);
+                    return false;
+                }
+                peak = std::max(peak, std::fabs(row[col]));
+            }
+            scale[r] = peak / 127.f;
+            for (int64_t col = 0; col < width; ++col)
+                q[col] = scale[r] ? static_cast<int8_t>(std::clamp(std::round(row[col] / scale[r]), -127.f, 127.f)) : 0;
+        }
+        ggml_backend_tensor_set(weight, quant.data(), start * width, count * width);
+        ggml_backend_tensor_set(scales, scale.data(), start * sizeof(float), count * sizeof(float));
+    }
+    return true;
+}
 
 ggml_tensor* ggml_ext_mul_n_mode(GGMLRunnerContext* runner_ctx, ggml_tensor* a, ggml_tensor* b, int mode) {
     auto ctx = runner_ctx->ggml_ctx;

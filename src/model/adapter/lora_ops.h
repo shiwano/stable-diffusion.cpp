@@ -3,6 +3,8 @@
 
 #include "core/ggml_runner.h"
 
+bool merge_i8_weight_diff(ggml_tensor* weight, ggml_tensor* scales, ggml_tensor* diff, int group);
+
 // n-mode tensor-matrix product
 // example: 2-mode product
 // A: [ne03, k, ne01, ne00]

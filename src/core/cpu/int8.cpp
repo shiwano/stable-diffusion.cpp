@@ -1,4 +1,5 @@
 #include "core/cpu/registration.h"
+#include "core/convrot.h"
 #include "core/ggml_extensions.h"
 
 #ifndef SD_USE_UPSTREAM_GGML
@@ -8,21 +9,6 @@
 
 namespace sd_cpu {
 
-    static void transform(float* values, int group) {
-        const float scale = 1.f / std::sqrt(float(group));
-        for (int i = 0; i < group; ++i)
-            values[i] *= scale;
-        for (int stride = 1; stride < group; stride *= 4)
-            for (int base = 0; base < group; base += 4 * stride)
-                for (int j = 0; j < stride; ++j) {
-                    const int i   = base + j;
-                    const float a = values[i], b = values[i + stride], c = values[i + 2 * stride], d = values[i + 3 * stride];
-                    values[i]              = a + b + c - d;
-                    values[i + stride]     = a + b - c + d;
-                    values[i + 2 * stride] = a - b + c + d;
-                    values[i + 3 * stride] = -a + b + c + d;
-                }
-    }
     struct I8Execution {
         SDI8Operation op;
         int64_t rows;
@@ -40,7 +26,7 @@ namespace sd_cpu {
             int8_t* dst      = e.quant + row * k;
             float amax       = 0.f, values[256];
             auto visit       = [&](auto fn) { if (!group) { for (int64_t i = 0; i < k; ++i) fn(i, src[i]); }
-            else for (int64_t base = 0; base < k; base += group) { std::memcpy(values, src + base, group * sizeof(float)); transform(values, group); for (int j = 0; j < group; ++j) fn(base + j, values[j]); } };
+            else for (int64_t base = 0; base < k; base += group) { std::memcpy(values, src + base, group * sizeof(float)); convrot_transform(values, group); for (int j = 0; j < group; ++j) fn(base + j, values[j]); } };
             visit([&](int64_t, float value) { amax = std::max(amax, std::fabs(value)); });
             const float scale = amax / 127.f, inverse = scale == 0.f ? 0.f : 1.f / scale;
             e.scales[row] = scale;

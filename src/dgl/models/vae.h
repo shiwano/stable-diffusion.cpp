@@ -4,6 +4,7 @@
 #include "config.h"
 #include "core/tensor.hpp"
 #include "dgl/models/fwd.h"
+#include "dgl/models/minimax_h3_reference_cache.h"
 #include "dgl/models/model_runtime.h"
 
 class RNG;
@@ -16,6 +17,7 @@ namespace sd::dgl::models {
 
     class VAE final : public Model {
         ModelRuntime runtime_;
+        MiniMaxH3ReferenceCache reference_cache_;
 
         bool refresh_weights() override { return runtime_.refresh_weights(); }
         bool attach_loras() override { return runtime_.attach_loras(); }
@@ -28,6 +30,7 @@ namespace sd::dgl::models {
         sd_vae_format_t format_ = SD_VAE_FORMAT_AUTO;
 
     public:
+        void set_conditioning_cache_size(size_t capacity) { reference_cache_.set_capacity(capacity); }
         SDVersion version() const { return runtime_.version; }
         int get_latent_channel() const;
         bool circular_x = false;
@@ -45,7 +48,7 @@ namespace sd::dgl::models {
         int video_frames_to_latent_frames(int frames);
         int align_video_frames(int frames);
         void validate_vae_latent(const Tensor<float>& latent) const;
-        Tensor<float> encode_vae_latents(const Tensor<float>& input, bool posterior_mode, const std::shared_ptr<RNG>& rng);
+        Tensor<float> encode_vae_latents(const Tensor<float>& input, bool posterior_mode, const std::shared_ptr<RNG>& rng, bool cache_reference = false);
         Tensor<float> vae_to_dit_latents(const Tensor<float>& latent);
         Tensor<float> dit_to_vae_latents(const Tensor<float>& latent);
         Tensor<float> decode_vae_latents(const Tensor<float>& latent, bool decode_video);

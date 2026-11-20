@@ -137,7 +137,7 @@ namespace sd::dgl::models {
         }
     }
 
-    sd::Tensor<float> VAE::encode_vae_latents(const sd::Tensor<float>& x, bool posterior_mode, const std::shared_ptr<RNG>& rng) {
+    sd::Tensor<float> VAE::encode_vae_latents(const sd::Tensor<float>& x, bool posterior_mode, const std::shared_ptr<RNG>& rng, bool cache_reference) {
         if (decode_only_)
             throw std::runtime_error("this TAE was loaded with decode_only and cannot encode");
         report_run_progress("vae_encode");
@@ -154,7 +154,10 @@ namespace sd::dgl::models {
             }
         }
         first_stage_model->clear_device_memory_error();
-        auto latents = first_stage_model->encode(n_threads, *input, vae_tiling_params, circular_x, circular_y);
+        const auto encode = [&] { return first_stage_model->encode(n_threads, *input, vae_tiling_params, circular_x, circular_y); };
+        auto latents = cache_reference && version() == VERSION_MINIMAX_H3
+                           ? reference_cache_.get(*input, vae_tiling_params, circular_x, circular_y, encode)
+                           : encode();
         if (latents.empty()) {
             const auto& error = first_stage_model->device_memory_error();
             if (!error.empty()) {

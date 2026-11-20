@@ -31,7 +31,7 @@ namespace sd::dgl::ops {
         if (channels != expected && ((expected != 3 && expected != 4) || channels == 2))
             throw std::runtime_error("pixel channels do not match the VAE");
         const auto adjusted = channels == expected ? Tensor<float>{} : sd::ensure_image_tensor_channels(pixels, expected);
-        auto output         = model.encode_vae_latents(channels == expected ? pixels : adjusted, posterior_mode, rng);
+        auto output         = model.encode_vae_latents(channels == expected ? pixels : adjusted, posterior_mode, rng, options.cache_reference);
         if (output.empty())
             throw std::runtime_error("VAE encode failed");
         return output;

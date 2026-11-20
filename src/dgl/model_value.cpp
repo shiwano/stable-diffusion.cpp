@@ -63,6 +63,8 @@ namespace sd::dgl {
     void set_conditioning_cache_size(const Value& value, size_t capacity) {
         if (value.type().kind == Kind::TextEncoder)
             value.as<models::TextEncoder>()->set_conditioning_cache_size(capacity);
+        else if (value.type().kind == Kind::VAE)
+            value.as<models::VAE>()->set_conditioning_cache_size(capacity);
     }
 
     Value build_model_variant(Context& context, const Value& base, const std::shared_ptr<const models::LoraConfig>& loras) {

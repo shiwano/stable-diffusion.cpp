@@ -485,7 +485,7 @@ namespace sd::dgl {
         registry["vae_encode"] = make_operation(
             {required("vae", Kind::VAE), required("pixels", Kind::Tensor), required("rng", Kind::Rng),
              optional("tiling", Kind::Dict), optional("circular_x", Kind::Boolean, false), optional("circular_y", Kind::Boolean, false),
-             choice("posterior", {"sample", "mode"}, "sample")},
+             choice("posterior", {"sample", "mode"}, "sample"), optional("cache_reference", Kind::Boolean, false)},
             {Kind::Tensor}, vae_encode);
         registry["vae_decode"] = make_operation(
             {required("vae", Kind::VAE), required("latent", Kind::Tensor), optional("tiling", Kind::Dict),

@@ -1040,6 +1040,8 @@ dimensions and incompatible conditioning relationships remain errors.
 ### VAE latent spaces
 
 `vae_encode(vae, pixels, rng)` returns a latent in the VAE's own space.
+For MiniMax-H3 video reference images, `cache_reference = true` reuses the
+encoder output for matching pixels and VAE settings on the same VAE.
 `vae_to_dit_latents(vae, latent)` applies the model's scaling, shift
 or normalization before sampling. After sampling, use
 `dit_to_vae_latents(vae, latent)` before `vae_decode(vae, latent)`.

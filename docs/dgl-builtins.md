@@ -133,7 +133,7 @@ Optional parameters are marked with `?`. Default values follow `=`. See [DGL syn
 | `upscale` | `upscaler: upscaler`, `image: tensor`, `factor?: int` | `tensor` |
 | `upscale_latent` | `upscaler: latent_upscaler`, `latent: tensor`, `width?: int`, `height?: int` | `tensor` |
 | `vae_decode` | `vae: vae`, `latent: tensor`, `tiling?: dict`, `circular_x?: bool = false`, `circular_y?: bool = false`, `dtype?: string = "u8"` | `tensor` |
-| `vae_encode` | `vae: vae`, `pixels: tensor`, `rng: rng`, `tiling?: dict`, `circular_x?: bool = false`, `circular_y?: bool = false`, `posterior?: string = "sample"` | `tensor` |
+| `vae_encode` | `vae: vae`, `pixels: tensor`, `rng: rng`, `tiling?: dict`, `circular_x?: bool = false`, `circular_y?: bool = false`, `posterior?: string = "sample"`, `cache_reference?: bool = false` | `tensor` |
 | `vae_to_dit_latents` | `vae: vae`, `latent: tensor` | `tensor` |
 | `vae_to_unet_latents` (alias of `vae_to_dit_latents`) | `vae: vae`, `latent: tensor` | `tensor` |
 | `video::encode` | `video: dict`, `audio?: dict`, `format?: string = "webm"` | `dict`<br>`data: bytes`<br>`mime_type: string` |

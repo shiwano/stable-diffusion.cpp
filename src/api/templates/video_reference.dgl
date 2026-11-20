@@ -6,6 +6,6 @@
 {% elif resize_image %}
     {{source}}_pixels = image::to_f32(tensor::interpolate({{source}}, size = [{{width}}, {{height}}], axes = [1, 2]), channels = 3)
 {% endif %}
-    {{name}}_raw = vae_to_dit_latents(vae, vae_encode(vae, {{pixels}}, rng = encode_rng{{vae_run_options}}))
+    {{name}}_raw = vae_to_dit_latents(vae, vae_encode(vae, {{pixels}}, cache_reference = {{resize_image}}, rng = encode_rng{{vae_run_options}}))
     {{name}} = h3_reference_noise({{name}}_raw, seed)
 {% endif %}

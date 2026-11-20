@@ -12,6 +12,7 @@ class RNG;
 
 namespace sd::dgl::ops {
     struct VAEOptions {
+        bool cache_reference = false;
         bool circular_x = false;
         bool circular_y = false;
         std::optional<sd::TilingConfig> tiling;

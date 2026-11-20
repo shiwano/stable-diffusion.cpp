@@ -357,6 +357,11 @@ the nearest 32-pixel multiple, with a minimum of 32. An axis may grow by up to
 16 pixels during alignment. Custom reference sizes and preprocessing require a
 [DGL program](../guides/edit.md#custom-reference-processing).
 
+Ref2VA reuses encoded reference images across requests in the same model context,
+including requests with different seeds. `--conditioning-cache-size` sets the
+maximum number of reference images retained (default 4, or 0 to disable).
+The cache holds at most 64 MiB of source pixel and latent data.
+
 The C API exposes the same inputs through `ref_images`, `ref_videos`, and
 the `ref_audios` video-option key. Each `sd_video_t` supplies its own
 frame rate and optional soundtrack; non-24-fps inputs are resampled internally.

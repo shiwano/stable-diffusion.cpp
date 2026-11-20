@@ -164,7 +164,9 @@ namespace sd::dgl {
         auto& engine   = *object<VAE>(args, "vae");
         sd::Tensor<float> decoded;
         const auto& input = pixels(args.at("pixels"), decoded);
-        auto output       = ops::encode_vae(engine, input, rng, get_string(args, "posterior") == "mode", vae_options(args));
+        auto options = vae_options(args);
+        options.cache_reference = get_bool(args, "cache_reference");
+        auto output = ops::encode_vae(engine, input, rng, get_string(args, "posterior") == "mode", options);
         return tensor_value(std::move(output));
     }
 

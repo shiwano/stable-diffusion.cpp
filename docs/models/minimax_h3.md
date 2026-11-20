@@ -247,8 +247,24 @@ pipeline.
 Reference inputs are presented to Qwen3-VL in image, video, then audio order.
 Videos are sampled at 2 fps for the Qwen presentation while their full 24 fps
 latents condition the diffusion transformer. Paired video and audio references
-share the same timeline. Ref2VA cannot be combined with `--init-img` or
-`--end-img` in one request.
+share the same timeline.
+
+Use repeatable `--guide-image PATH@FRAME` and `--guide-audio WAV@FRAME` to
+anchor guides on the target timeline, including in Ref2VA requests. For example,
+`--ref-image actor.png --guide-image board.png@0 --guide-audio line.wav@24 --guide-image ending.png@-1`
+anchors the dialogue at one second. Negative indices count from the aligned
+frame count. `--init-img` and `--end-img` anchor the first and last frames.
+
+A visual guide accepts one image or a 24 fps frame directory. Clips shorter
+than five frames use their first image. Longer clips use the largest prefix of
+`17k + 5` frames and must fit at the specified index. Audio guides require
+audio VAE encoder weights and are cropped to the remaining target duration.
+Frame-indexed guides do not receive prompt tags. Without Ref2VA references,
+`--init-img` and `--end-img` retain their legacy Qwen3-VL picture tags.
+
+C API and `sdcpp` requests pair `guide_videos` and `guide_audios` with
+`guide_video_indices` and `guide_audio_indices`, respectively. Use a
+single-frame video for an image. A C API video guide can include its own soundtrack.
 
 Reference images keep their aspect ratio and are only downscaled when they
 exceed the configured limit; neither mode scales a reference up. The limit is
@@ -400,7 +416,7 @@ Notes for this mode:
 - `--hires-sigmas` can replace `--hires-denoising-strength` when the second
   stage should resume from an explicit sigma schedule, which is how most
   two-stage H3 workflows split the sampler.
-- Keyframe conditioning (`--init-img` / `--end-img`) is not available together
+- Visual guide conditioning (`--guide-image`, `--init-img`, `--end-img`) is not available together
   with hires yet: those latents are encoded at the first stage resolution and
   would have to be re-encoded for the hires canvas. Use T2VA or Ref2VA.
 - The second stage runs at the larger latent, so it is the memory-hungry half;

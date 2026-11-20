@@ -378,6 +378,10 @@ with at least two entries. SLG layer indices are nonnegative integers.
 | `force_sdxl_vae_conv_scale` | `bool` | context |
 | `fps` | `int` | video, vid_upscale |
 | `frames` | `tensor` | vid_upscale |
+| `guide_audio_indices` | `ints` | video |
+| `guide_audios` | `audios` | video |
+| `guide_video_indices` | `ints` | video |
+| `guide_videos` | `videos` | video |
 | `height` | `int` | image, video, adetail |
 | `high_noise_diffusion_model_path` | `string` | context |
 | `high_noise_sample.args` | `string` | video |

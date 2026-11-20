@@ -375,14 +375,30 @@ namespace sd::pipeline {
         return sd::zeros<float>({audio_length, 2, 32, 1});
     }
 
+    static sd::Tensor<float> minimax_h3_guide_rgb(const sd::Image& image) {
+        auto frame = sd_image_to_tensor(image);
+        if (image.channel == 1 || image.channel == 2) {
+            auto gray = image.channel == 1 ? std::move(frame) : sd::ops::slice(frame, 2, 0, 1);
+            return sd::ops::concat(sd::ops::concat(gray, gray, 2), gray, 2);
+        }
+        return ensure_image_tensor_channels(std::move(frame), 3);
+    }
+
     static sd::Tensor<float> prepare_minimax_h3_reference_waveform(const sd::Audio& audio,
-                                                                   int target_sample_rate = 32000) {
+                                                                   int target_sample_rate,
+                                                                   int guide_latents) {
         if (audio.data == nullptr || audio.sample_count == 0 || audio.channels == 0 || audio.sample_rate == 0) {
             return {};
         }
         uint64_t output_samples = static_cast<uint64_t>(std::llround(
             static_cast<long double>(audio.sample_count) * target_sample_rate / audio.sample_rate));
         output_samples          = std::max<uint64_t>(1, output_samples);
+        if (guide_latents > 0) {
+            // Encoder output i sees through sample 800*i + 9924 (symmetric convolutions).
+            // The attention projection is causal, so later samples cannot affect this prefix.
+            uint64_t required = 800ULL * (guide_latents - 1) + 9925;
+            output_samples = std::min(output_samples, required);
+        }
         uint64_t padded_samples = (output_samples + 799) / 800 * 800;
         // Keep stereo streams planar for the mono-per-stream audio encoder:
         // [samples, 1, stereo, batch]. This avoids flattening interleaved L/R
@@ -529,11 +545,6 @@ namespace sd::pipeline {
             bool has_references = sd_vid_gen_params->ref_images_count > 0 ||
                                   sd_vid_gen_params->ref_videos_count > 0 ||
                                   sd_vid_gen_params->ref_audios_count > 0;
-            if (has_references && (!start_image.empty() || !end_image.empty())) {
-                LOG_ERROR("MiniMax-H3 keyframes and Ref2VA references cannot be used together");
-                return std::nullopt;
-            }
-
             if (sd_vid_gen_params->control_frames_size > 0) {
                 LOG_ERROR("MiniMax-H3 control_frames are not implemented");
                 return std::nullopt;
@@ -553,19 +564,14 @@ namespace sd::pipeline {
                 if (image.empty()) {
                     return true;
                 }
-                auto video_image = image.reshape({image.shape()[0],
-                                                  image.shape()[1],
-                                                  1,
-                                                  image.shape()[2],
-                                                  image.shape()[3]});
-                auto latent      = sd->encode_first_stage(video_image);
+                auto latent = sd->encode_first_stage(image.dim() == 4 ? image.unsqueeze(2) : image);
                 if (latent.empty()) {
                     LOG_ERROR("failed to encode MiniMax-H3 %s keyframe", name);
                     return false;
                 }
-                latents.ref_images.push_back(image);
+                int32_t index = static_cast<int32_t>(latents.ref_latents.size());
+                latents.minimax_reference_blocks.push_back({MiniMaxH3ReferenceKind::VIDEO, index, -1, frame_index});
                 latents.ref_latents.push_back(add_visual_noise(std::move(latent)));
-                latents.keyframe_indices.push_back(frame_index);
                 return true;
             };
 
@@ -577,15 +583,15 @@ namespace sd::pipeline {
                     std::vector<int64_t>{width, height, image.shape()[2], image.shape()[3]});
             };
 
-            auto encode_reference_audio = [&](const sd::Audio& audio,
-                                              int32_t* audio_index) -> bool {
+            auto encode_condition_audio = [&](const sd::Audio& audio,
+                                              int32_t* audio_index, int guide_latents = 0) -> bool {
                 if (sd->audio_vae_model == nullptr) {
-                    LOG_ERROR("MiniMax-H3 Ref2VA audio requires --audio-vae with encoder weights");
+                    LOG_ERROR("MiniMax-H3 audio conditioning requires --audio-vae with encoder weights");
                     return false;
                 }
                 auto waveform = prepare_minimax_h3_reference_waveform(
                     audio,
-                    sd->audio_vae_model->input_sample_rate());
+                    sd->audio_vae_model->input_sample_rate(), guide_latents);
                 if (waveform.empty()) {
                     LOG_ERROR("invalid MiniMax-H3 reference audio");
                     return false;
@@ -599,6 +605,67 @@ namespace sd::pipeline {
                 latents.reference_audio_latents.push_back(std::move(encoded));
                 return true;
             };
+
+            if (!add_keyframe(start_image, 0, "start") ||
+                !add_keyframe(end_image, request->frames - 1, "end")) {
+                return std::nullopt;
+            }
+            if (!has_references) {
+                if (!start_image.empty()) {
+                    latents.ref_images.push_back(start_image);
+                }
+                if (!end_image.empty()) {
+                    latents.ref_images.push_back(end_image);
+                }
+            }
+            auto resolve_index = [&](int index) {
+                return index < 0 ? request->frames + index : index;
+            };
+            auto add_audio_guide = [&](const sd::Audio& input, int start) {
+                if (start < 0 || start >= request->frames) {
+                    LOG_ERROR("MiniMax-H3 audio guide frame index outside target");
+                    return false;
+                }
+                int room = latents.audio_length - static_cast<int>((5LL * start + 2) / 3);
+                int32_t index = -1;
+                if (room < 1 || !encode_condition_audio(input, &index, room)) {
+                    return false;
+                }
+                auto& audio = latents.reference_audio_latents[index];
+                if (room < audio.shape()[0]) {
+                    audio = sd::ops::slice(audio, 0, 0, room);
+                }
+                latents.minimax_reference_blocks.push_back({MiniMaxH3ReferenceKind::AUDIO, -1, index, start});
+                return true;
+            };
+            for (int i = 0; i < sd_vid_gen_params->guide_videos_count; ++i) {
+                const auto& guide = sd_vid_gen_params->guide_videos[i];
+                int start = resolve_index(sd_vid_gen_params->guide_video_indices[i]);
+                int count = guide.frame_count < 5 ? 1 : guide.frame_count - (guide.frame_count - 5) % 17;
+                if (!guide.frames || guide.frame_count < 1 || guide.fps != 24 ||
+                    start < 0 || start > request->frames - count) {
+                    LOG_ERROR("MiniMax-H3 visual guide requires 24 fps frames that fit at the requested index");
+                    return std::nullopt;
+                }
+                sd::Tensor<float> video({request->width, request->height, count, 3, 1});
+                for (int t = 0; t < count; ++t) {
+                    auto frame = minimax_h3_guide_rgb(guide.frames[t]);
+                    if (frame.empty()) {
+                        LOG_ERROR("invalid MiniMax-H3 guide frame");
+                        return std::nullopt;
+                    }
+                    frame = sd::resize_and_center_crop(frame, request->width, request->height);
+                    sd::ops::slice_assign(&video, 2, t, t + 1, frame.unsqueeze(2));
+                }
+                if (!add_keyframe(video, start, "guide") || (guide.audio.data && !add_audio_guide(guide.audio, start))) {
+                    return std::nullopt;
+                }
+            }
+            for (int i = 0; i < sd_vid_gen_params->guide_audios_count; ++i) {
+                if (!add_audio_guide(sd_vid_gen_params->guide_audios[i], resolve_index(sd_vid_gen_params->guide_audio_indices[i]))) {
+                    return std::nullopt;
+                }
+            }
 
             if (has_references) {
                 LOG_INFO("MiniMax-H3 Ref2VA: %d image(s), %d video(s), %d audio clip(s)",
@@ -711,7 +778,7 @@ namespace sd::pipeline {
                     int32_t audio_index = -1;
                     bool has_audio      = reference.audio.data != nullptr && reference.audio.sample_count > 0;
                     if (has_audio) {
-                        if (!encode_reference_audio(reference.audio, &audio_index)) {
+                        if (!encode_condition_audio(reference.audio, &audio_index)) {
                             return std::nullopt;
                         }
                         MiniMaxH3PresentationItem audio_item;
@@ -739,7 +806,7 @@ namespace sd::pipeline {
 
                 for (int audio_idx = 0; audio_idx < sd_vid_gen_params->ref_audios_count; ++audio_idx) {
                     int32_t encoded_index = -1;
-                    if (!encode_reference_audio(sd_vid_gen_params->ref_audios[audio_idx], &encoded_index)) {
+                    if (!encode_condition_audio(sd_vid_gen_params->ref_audios[audio_idx], &encoded_index)) {
                         return std::nullopt;
                     }
                     MiniMaxH3PresentationItem item;
@@ -766,11 +833,6 @@ namespace sd::pipeline {
             if (!has_references && (!start_image.empty() || !end_image.empty())) {
                 LOG_INFO(!start_image.empty() && !end_image.empty() ? "MiniMax-H3 FL2VA" : !start_image.empty() ? "MiniMax-H3 I2VA"
                                                                                                                 : "MiniMax-H3 end-frame conditioning");
-            }
-            if (!has_references &&
-                (!add_keyframe(start_image, 0, "start") ||
-                 !add_keyframe(end_image, request->frames - 1, "end"))) {
-                return std::nullopt;
             }
         }
 
@@ -1223,11 +1285,6 @@ namespace sd::pipeline {
             embeds.cond.c_ref_images       = latents.ref_latents;
             embeds.cond.c_ref_audios       = latents.reference_audio_latents;
             embeds.cond.c_reference_blocks = latents.minimax_reference_blocks;
-            if (!latents.keyframe_indices.empty()) {
-                embeds.cond.c_position_ids = sd::Tensor<int32_t>(
-                    {static_cast<int64_t>(latents.keyframe_indices.size())},
-                    latents.keyframe_indices);
-            }
         }
         if (sd->version == VERSION_WAN2_2_S2V) {
             embeds.cond.c_ref_images = latents.ref_latents;
@@ -1249,7 +1306,6 @@ namespace sd::pipeline {
                 embeds.uncond.c_ref_images       = latents.ref_latents;
                 embeds.uncond.c_ref_audios       = latents.reference_audio_latents;
                 embeds.uncond.c_reference_blocks = latents.minimax_reference_blocks;
-                embeds.uncond.c_position_ids     = embeds.cond.c_position_ids;
             }
             if (sd->version == VERSION_WAN2_2_S2V) {
                 embeds.uncond.c_ref_images = latents.ref_latents;
@@ -1885,8 +1941,8 @@ namespace sd::pipeline {
                     return false;
                 }
                 if (sd_vid_gen_params->init_image.data != nullptr ||
-                    sd_vid_gen_params->end_image.data != nullptr) {
-                    LOG_ERROR("MiniMax-H3 hires does not support --init-img/--end-img keyframes yet; use T2VA or Ref2VA");
+                    sd_vid_gen_params->end_image.data != nullptr || sd_vid_gen_params->guide_videos_count > 0) {
+                    LOG_ERROR("MiniMax-H3 hires does not support visual guides or --init-img/--end-img keyframes yet; use T2VA or Ref2VA");
                     return false;
                 }
                 if (request.hires.target_width <= 0 || request.hires.target_height <= 0) {

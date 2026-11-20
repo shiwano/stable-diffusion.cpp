@@ -2645,7 +2645,6 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                 const size_t target_index = static_cast<size_t>(std::abs(step));
                 diffusion_params.extra    = MiniMaxH3DiffusionExtra{
                     condition.c_token_types.empty() ? nullptr : &condition.c_token_types,
-                    condition.c_position_ids.empty() ? nullptr : &condition.c_position_ids,
                     condition.c_ref_audios.empty() ? nullptr : &condition.c_ref_audios,
                     condition.c_reference_blocks.empty() ? nullptr : &condition.c_reference_blocks,
                     version == VERSION_MINIMAX_H3_IMAGE ? 0 : (version == VERSION_P_H3_IMAGE ? 2 : audio_length),

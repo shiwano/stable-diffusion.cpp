@@ -18,6 +18,8 @@
 // The command-line argument at `index` as UTF-8 (on Windows, read again from
 // the UTF-16 command line: argv itself is in the ANSI code page).
 std::string argv_to_utf8(int index, const char** argv);
+size_t minimax_h3_guide_frame_count(size_t available);
+void normalize_guide_frame_rgb(SDImage& image);
 
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")
@@ -232,6 +234,12 @@ struct SDGenerationParams {
     std::string ip_adapter_image_path;
     std::vector<std::string> ref_image_paths;
     std::vector<std::string> ref_video_paths;
+    std::vector<std::string> guide_video_paths;
+    std::vector<std::string> guide_audio_paths;
+    std::vector<int32_t> guide_video_indices;
+    std::vector<int32_t> guide_audio_indices;
+    std::vector<std::vector<SDImageOwner>> guide_videos;
+    std::vector<SDAudioOwner> guide_audios;
     std::vector<std::string> ref_video_audio_paths;
     std::vector<std::string> ref_audio_paths;
     std::string control_video_path;

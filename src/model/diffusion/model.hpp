@@ -135,11 +135,11 @@ struct MiniMaxH3ReferenceBlock {
     MiniMaxH3ReferenceKind kind = MiniMaxH3ReferenceKind::IMAGE;
     int32_t video_index         = -1;
     int32_t audio_index         = -1;
+    int32_t frame_index         = -1;
 };
 
 struct MiniMaxH3DiffusionExtra {
     const sd::Tensor<int32_t>* text_token_tags                    = nullptr;
-    const sd::Tensor<int32_t>* keyframe_indices                   = nullptr;
     const std::vector<sd::Tensor<float>>* reference_audio_latents = nullptr;
     const std::vector<MiniMaxH3ReferenceBlock>* reference_blocks  = nullptr;
     int audio_length                                              = 0;

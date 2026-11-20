@@ -35,7 +35,6 @@ namespace sd::pipeline {
         std::vector<sd::Tensor<float>> reference_audio_latents;
         std::vector<MiniMaxH3ReferenceBlock> minimax_reference_blocks;
         std::vector<MiniMaxH3PresentationItem> minimax_presentation_refs;
-        std::vector<int32_t> keyframe_indices;
         sd::Tensor<float> denoise_mask;
         sd::Tensor<float> clip_vision_output;
         sd::Tensor<float> vace_context;

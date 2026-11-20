@@ -97,6 +97,12 @@ static sd_status_t run_video(sd_ctx_t* ctx, const sd::VideoConfig* params, sd::V
                        ctx->sd->diffusion_model->get_desc() == "Wan2.x-VACE-14B");
     if (params->control_frames_size > 0 && !vace)
         return sd::api::error(SD_STATUS_UNSUPPORTED, "control_frames", "requires a VACE model");
+    if (params->guide_videos_count != params->guide_video_indices_count)
+        return sd::api::error(SD_STATUS_INVALID_ARGUMENT, "guide_video_indices", "each visual guide requires one frame index");
+    if (params->guide_audios_count != params->guide_audio_indices_count)
+        return sd::api::error(SD_STATUS_INVALID_ARGUMENT, "guide_audio_indices", "each audio guide requires one frame index");
+    if (ctx->sd->version != VERSION_MINIMAX_H3 && (params->guide_videos_count || params->guide_audios_count))
+        return sd::api::error(SD_STATUS_UNSUPPORTED, params->guide_videos_count ? "guide_videos" : "guide_audios", "guides require MiniMax-H3 video");
     if (params->ref_videos_count > 0 && !sd_version_is_minimax_h3(ctx->sd->version))
         return sd::api::error(SD_STATUS_UNSUPPORTED, "ref_videos", "requires a MiniMax-H3 model");
     if (params->ref_audios_count > 0 && !sd_version_is_minimax_h3(ctx->sd->version) && ctx->sd->version != VERSION_WAN2_2_S2V)

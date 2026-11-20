@@ -370,6 +370,44 @@ bool load_images_from_dir(const std::string dir,
     return true;
 }
 
+static bool load_guide_image(const std::string& path, SDImageOwner& image) {
+    if (!load_sd_image_from_file(image.put(), path.c_str(), 0, 0, 0)) {
+        return false;
+    }
+    normalize_guide_frame_rgb(image.get());
+    return true;
+}
+
+static bool load_guide_frames(const fs::path& dir_path, std::vector<SDImageOwner>& images) {
+    std::vector<fs::directory_entry> entries;
+    for (const auto& entry : fs::directory_iterator(dir_path)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        std::string ext = entry.path().extension().u8string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".webp") {
+            entries.push_back(entry);
+        }
+    }
+
+    std::sort(entries.begin(), entries.end(),
+              [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                  return a.path().filename().u8string() < b.path().filename().u8string();
+              });
+    entries.resize(minimax_h3_guide_frame_count(entries.size()));
+    for (const auto& entry : entries) {
+        std::string path = entry.path().u8string();
+        LOG_VERBOSE("load image %zu from '%s'", images.size(), path.c_str());
+        SDImageOwner image;
+        if (!load_guide_image(path, image)) {
+            return false;
+        }
+        images.push_back(std::move(image));
+    }
+    return true;
+}
+
 std::string format_frame_idx(std::string pattern, int frame_idx) {
     std::smatch match;
     std::string result = pattern;
@@ -861,6 +899,23 @@ int main(int argc, const char* argv[]) {
                 return 1;
             }
             gen_params.ref_images.push_back(std::move(ref_image));
+        }
+    }
+
+    for (const auto& path : gen_params.guide_video_paths) {
+        auto& frames = gen_params.guide_videos.emplace_back();
+        if (fs::is_directory(fs::u8path(path))) {
+            if (!load_guide_frames(fs::u8path(path), frames) || frames.empty()) {
+                return 1;
+            }
+        } else if (!load_guide_image(path, frames.emplace_back())) {
+            LOG_ERROR("failed to load guide image '%s'", path.c_str());
+            return 1;
+        }
+    }
+    for (const auto& path : gen_params.guide_audio_paths) {
+        if (!load_audio(path, gen_params.guide_audios.emplace_back())) {
+            return 1;
         }
     }
 

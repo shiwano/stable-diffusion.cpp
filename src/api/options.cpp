@@ -380,6 +380,10 @@ static void add_generation_specs(std::vector<ParamSpec>& specs) {
     vid.image("end_image", &sd::VideoConfig::end_image);
     vid.number("moe_boundary", &sd::VideoConfig::moe_boundary, 0, 1);
     vid.array("ref_audios", &sd::VideoConfig::ref_audios, &sd::VideoConfig::ref_audios_count);
+    vid.array("guide_videos", &sd::VideoConfig::guide_videos, &sd::VideoConfig::guide_videos_count);
+    vid.array("guide_video_indices", &sd::VideoConfig::guide_video_indices, &sd::VideoConfig::guide_video_indices_count);
+    vid.array("guide_audios", &sd::VideoConfig::guide_audios, &sd::VideoConfig::guide_audios_count);
+    vid.array("guide_audio_indices", &sd::VideoConfig::guide_audio_indices, &sd::VideoConfig::guide_audio_indices_count);
     vid.array("ref_videos", &sd::VideoConfig::ref_videos, &sd::VideoConfig::ref_videos_count);
     vid.number("vace_strength", &sd::VideoConfig::vace_strength, 0, std::numeric_limits<float>::max());
     vid.integer("video_frames", &sd::VideoConfig::video_frames, 1, INT32_MAX);

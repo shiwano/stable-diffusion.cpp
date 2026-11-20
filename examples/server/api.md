@@ -1770,7 +1770,7 @@ Allowed `output_format` values:
 Output format behavior:
 
 - `output_format` defaults to `webm`
-- `webp` means animated WebP
+- `webp` means animated WebP. Set `output_compression` to `100` for lossless frames.
 - `avi` means MJPG AVI
 - `webm` requires the server to be built with WebM support; otherwise the request returns `400`
 

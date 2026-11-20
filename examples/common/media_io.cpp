@@ -1081,6 +1081,7 @@ std::vector<uint8_t> create_animated_webp_from_sd_images_to_vector(SDImage* imag
         return {};
     }
 
+    config.lossless     = (quality == 100);
     config.quality      = static_cast<float>(quality);
     config.method       = 4;
     config.thread_level = 1;

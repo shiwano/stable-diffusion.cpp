@@ -109,7 +109,7 @@ struct SDCliParams {
              &output_begin_idx},
             {"",
              "--compression-quality",
-             "compression quality of video and JPEG / WebP images (90 by default)",
+             "compression quality of video and JPEG / WebP images (default: 90, use 100 for lossless animated WebP)",
              &compression_quality},
         };
 

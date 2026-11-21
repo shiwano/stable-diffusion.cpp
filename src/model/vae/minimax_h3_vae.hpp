@@ -765,30 +765,6 @@ namespace MiniMaxH3VAE {
             return result;
         }
 
-        static sd::Tensor<float> blend_temporal(const sd::Tensor<float>& previous,
-                                                const sd::Tensor<float>& current,
-                                                int64_t extent) {
-            auto output            = current;
-            extent                 = std::min({extent, previous.shape()[2], current.shape()[2]});
-            int64_t previous_start = previous.shape()[2] - extent;
-            for (int64_t b = 0; b < current.shape()[4]; ++b) {
-                for (int64_t c = 0; c < current.shape()[3]; ++c) {
-                    for (int64_t t = 0; t < extent; ++t) {
-                        float wb = static_cast<float>(t) / extent;
-                        float wa = 1.f - wb;
-                        for (int64_t h = 0; h < current.shape()[1]; ++h) {
-                            for (int64_t w = 0; w < current.shape()[0]; ++w) {
-                                output.index(w, h, t, c, b) =
-                                    previous.index(w, h, previous_start + t, c, b) * wa +
-                                    current.index(w, h, t, c, b) * wb;
-                            }
-                        }
-                    }
-                }
-            }
-            return output;
-        }
-
         sd::Tensor<float> encode(int n_threads,
                                  const sd::Tensor<float>& x,
                                  sd::TilingConfig tiling_params,
@@ -942,12 +918,18 @@ namespace MiniMaxH3VAE {
                 input = repeat_last_frame(input, pad_tokens);
             }
 
-            sd::Tensor<float> overlap;
+            const int64_t expected_frames = ((x.shape()[2] - 2) / 5) * 17 + 5;
+            sd::Tensor<float> result;
+            std::vector<int64_t> chunk_shape;
+            // Frames before next_frame are final. The previous chunk's overlap starts at next_frame.
+            int64_t next_frame             = 0;
+            int64_t pending_overlap_frames = 0;
             auto plan = make_vae_temporal_tile_plan(
                 input.shape()[2],
                 {static_cast<int>(tokens_per_chunk + token_overlap), static_cast<int>(token_overlap)});
             GGML_ASSERT(plan.tiles.size() == static_cast<size_t>(num_chunks));
-            auto result = process_vae_temporal_tiles(input, plan, [&](const sd::Tensor<float>& chunk, const VAETemporalTile& tile) {
+            for (const auto& tile : plan.tiles) {
+                auto chunk = sd::ops::slice(input, 2, tile.start, tile.end);
                 // keep the runner alive across chunks; ending it here would
                 // evict and reload the decoder weights every chunk
                 auto decoded = VAE::decode(n_threads,
@@ -959,41 +941,53 @@ namespace MiniMaxH3VAE {
                                            silent,
                                            false);
                 if (decoded.empty()) {
-                    return sd::Tensor<float>();
+                    runner_end();
+                    return {};
                 }
 
-                int64_t first_end = std::min<int64_t>(frames_per_chunk, decoded.shape()[2]);
-                auto first        = sd::ops::slice(decoded,
-                                                   2,
-                                                   std::min<int64_t>(frame_pre_padding, first_end),
-                                                   first_end);
-                if (!overlap.empty()) {
-                    first   = blend_temporal(overlap, first, frame_overlap);
-                    overlap = {};
+                if (tile.first) {
+                    chunk_shape = decoded.shape();
                 }
-
-                if (decoded.shape()[2] > frames_per_chunk + frame_pre_padding) {
-                    overlap = sd::ops::slice(decoded,
-                                             2,
-                                             frames_per_chunk + frame_pre_padding,
-                                             decoded.shape()[2]);
+                if (decoded.dim() != 5 || decoded.shape() != chunk_shape || decoded.shape()[2] <= frame_pre_padding) {
+                    LOG_ERROR("unexpected H3 video VAE decoded chunk shape: %s",
+                              sd::tensor_shape_to_string(decoded.shape()).c_str());
+                    runner_end();
+                    return {};
                 }
-                if (tile.last && !overlap.empty()) {
-                    first   = sd::ops::concat(first, overlap, 2);
-                    overlap = {};
+                const int64_t frames = decoded.shape()[2];
+                const int64_t body = std::min(frames, frames_per_chunk) - frame_pre_padding;
+                const int64_t tail = std::max<int64_t>(0, frames - frames_per_chunk - frame_pre_padding);
+                if (tile.first) {
+                    auto shape = decoded.shape();
+                    shape[2] = std::min(expected_frames, num_chunks * body + tail);
+                    result = sd::Tensor<float>(std::move(shape));
                 }
-                return first;
-            });
+                const int64_t output_frames = result.shape()[2];
+                const int64_t count = std::min(body, output_frames - next_frame);
+                const int64_t blended = std::min(pending_overlap_frames, count);
+                const int64_t keep = tile.last ? tail : std::min({tail, body, frame_overlap});
+                const int64_t tail_count = std::min(keep, output_frames - next_frame - count);
+                const int64_t pixels = decoded.shape()[0] * decoded.shape()[1];
+                for (int64_t plane = 0; plane < decoded.numel() / (pixels * frames); ++plane) {
+                    const float* src = decoded.data() + (plane * frames + frame_pre_padding) * pixels;
+                    float* dst = result.data() + (plane * output_frames + next_frame) * pixels;
+                    for (int64_t t = 0; t < blended; ++t) {
+                        const float wb = static_cast<float>(t) / pending_overlap_frames;
+                        for (int64_t i = t * pixels; i < (t + 1) * pixels; ++i) {
+                            dst[i] = dst[i] * (1.f - wb) + src[i] * wb;
+                        }
+                    }
+                    std::copy_n(src + blended * pixels, (count - blended) * pixels, dst + blended * pixels);
+                    if (tail_count > 0) {
+                        const int64_t tail_start = tile.last ? frames - tail : frames - keep;
+                        std::copy_n(decoded.data() + (plane * frames + tail_start) * pixels,
+                                    tail_count * pixels, dst + count * pixels);
+                    }
+                }
+                next_frame += count;
+                pending_overlap_frames = keep;
+            }
             runner_end();
-            if (result.empty()) {
-                return {};
-            }
-
-            int64_t expected_frames = input.shape()[2] <= 1 ? 1 : ((x.shape()[2] - 2) / 5) * 17 + 5;
-            expected_frames         = std::max<int64_t>(1, expected_frames);
-            if (result.shape()[2] > expected_frames) {
-                result = sd::ops::slice(result, 2, 0, expected_frames);
-            }
             return result;
         }
 

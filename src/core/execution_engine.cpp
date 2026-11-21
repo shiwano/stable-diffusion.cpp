@@ -32,6 +32,7 @@ namespace sd {
         Tensor<float> output_;
         std::string device_memory_error_;
 
+        enum class PlanResult { Success, Failed, WorkspaceCapacityExceeded };
         using GraphCutPlan = ggml_graph_cut::Plan;
         ggml_tensor* canonical_param_tensor(ggml_tensor* tensor);
         std::vector<ggml_tensor*> collect_used_param_tensors(ggml_cgraph* graph);
@@ -47,7 +48,8 @@ namespace sd {
         std::vector<DeviceMemoryRequest> memory_requests(const std::vector<BackendBufferSize>& sizes, size_t pending_cache_bytes) const;
         bool fits(const std::vector<DeviceMemoryRequest>& requests, const std::vector<ggml_tensor*>& params, bool allow_reclamation = false) const;
         bool execute_segment(ggml_cgraph* graph, int n_threads, const std::function<void()>& on_before_compute);
-        bool execute_graph(ggml_cgraph* graph, int n_threads, bool no_return, const std::function<bool()>& read_outputs);
+        PlanResult execute_plan(ggml_cgraph* graph, const GraphCutPlan& plan, const ComputeWorkspace::Measurement* full_measurement = nullptr);
+        bool execute_graph(ggml_cgraph* graph);
         bool is_multi_device() const { return !session_.extra_backends_.empty(); }
         size_t retained_runtime_buffer_bytes(ggml_backend_t backend) const { return session_.resident_bytes(backend); }
         void sync_runtime_residency() { engine_.sync_residency(session_); }
@@ -73,7 +75,7 @@ namespace sd {
         }
 
         ComputeResult run() {
-            if (!execute_graph(task_.graph, task_.n_threads, task_.no_return, task_.read_outputs)) {
+            if (!execute_graph(task_.graph)) {
                 return {last_compute_status_, {}, std::move(device_memory_error_)};
             }
             return {GGML_STATUS_SUCCESS, std::move(output_), {}};
@@ -531,11 +533,11 @@ namespace sd {
         return true;
     }
 
-    bool GraphExecution::execute_graph(ggml_cgraph* graph, int n_threads, bool no_return, const std::function<bool()>& read_outputs) {
+    bool GraphExecution::execute_graph(ggml_cgraph* graph) {
         if (!assign_graph_cut_layer_split_backends(graph)) {
             return false;
         }
-        const auto params       = collect_used_param_tensors(graph);
+        auto params             = collect_used_param_tensors(graph);
         const auto& cached_plan = resolve_graph_cut_plan(graph);
         auto manager            = manager_;
         const bool can_segment  = !is_multi_device() && !sd_backend_is_cpu(session_.backend_) &&
@@ -560,8 +562,8 @@ namespace sd {
                 segmented = !fits(requests, params, true);
             }
         }
-        ggml_graph_cut::Plan monolithic_plan;
         if (!segmented) {
+            ggml_graph_cut::Plan monolithic_plan;
             monolithic_plan.segments.emplace_back();
             auto& segment               = monolithic_plan.segments.back();
             segment.group_name          = "graph";
@@ -580,8 +582,33 @@ namespace sd {
                                        : ggml_graph_cut::Segment::INPUT_EXTERNAL;
                 segment.input_refs.push_back(input);
             }
+
+            const auto result = execute_plan(graph, monolithic_plan, &full_measurement);
+            if (result != PlanResult::WorkspaceCapacityExceeded) {
+                return result == PlanResult::Success;
+            }
+            if (!can_segment) {
+                LOG_ERROR("%s segment 1/1 (graph) failed during workspace capacity check", task_.description.c_str());
+                return false;
+            }
+            // A full-graph staging block cannot be evicted once a segment pins any of its weights.
+            for (auto*& param : params) {
+                if (auto* managed = manager->resolve_param_tensor(param)) {
+                    param = managed;
+                }
+            }
+            manager->evict_compute_backend_params(params);
+            LOG_WARN("%s failed the workspace capacity check after preparing weights, retrying with %zu segments",
+                     task_.description.c_str(), cached_plan.segments.size());
         }
-        const auto& plan            = segmented ? cached_plan : monolithic_plan;
+        return execute_plan(graph, cached_plan) == PlanResult::Success;
+    }
+
+    GraphExecution::PlanResult GraphExecution::execute_plan(ggml_cgraph* graph, const GraphCutPlan& plan,
+                                                            const ComputeWorkspace::Measurement* full_measurement) {
+        last_compute_status_        = GGML_STATUS_FAILED;
+        const bool segmented        = full_measurement == nullptr;
+        const auto& manager         = manager_;
         const bool segments_changed = plan.segments.size() != session_.logged_segment_count_;
         if (segments_changed && (segmented || session_.logged_segment_count_ > 1)) {
             LOG_VERBOSE("%s using %zu segment%s", task_.description.c_str(),
@@ -609,7 +636,7 @@ namespace sd {
                 if (!device_memory_error_.empty()) {
                     device_memory_error_ = message + ": " + device_memory_error_;
                 }
-                return false;
+                return PlanResult::Failed;
             };
             session_.cut_cache_.prune(segment.live_cut_names);
             bindings.reset(segment);
@@ -646,7 +673,7 @@ namespace sd {
                     }
                 }
             }
-            auto measurement = segmented ? measure(segment_graph, &cache_outputs) : full_measurement;
+            auto measurement = segmented ? measure(segment_graph, &cache_outputs) : *full_measurement;
             if (!session_.workspace_.prepare(measurement)) {
                 last_compute_status_ = GGML_STATUS_ALLOC_FAILED;
                 return fail_segment("workspace preparation");
@@ -678,6 +705,9 @@ namespace sd {
                 return fail_segment("workspace preparation");
             }
             if (!ensure_capacity()) {
+                if (!segmented) {
+                    return PlanResult::WorkspaceCapacityExceeded;
+                }
                 return fail_segment("workspace capacity check");
             }
             if (!session_.cut_cache_.bind_outputs(cache_outputs)) {
@@ -718,7 +748,7 @@ namespace sd {
             }
             LOG_DEBUG("%s executing segment %zu/%zu: %s", task_.description.c_str(),
                       index + 1, plan.segments.size(), segment.group_name.c_str());
-            if (!execute_segment(segment_graph, n_threads, [&]() { weights.submit_next(); })) {
+            if (!execute_segment(segment_graph, task_.n_threads, [&]() { weights.submit_next(); })) {
                 return fail_segment("execution");
             }
             auto cache_status = session_.cache_.capture(segment_graph);
@@ -731,10 +761,10 @@ namespace sd {
             }
             sync_runtime_residency();
             if (last) {
-                if (read_outputs && !read_outputs()) {
+                if (task_.read_outputs && !task_.read_outputs()) {
                     return fail_segment("output finalization");
                 }
-                if (!no_return) {
+                if (!task_.no_return) {
                     output_ = read_graph_tensor(task_.output, "output");
                     if (output_.empty()) {
                         return fail_segment("output readback");
@@ -758,7 +788,7 @@ namespace sd {
             session_.logged_compute_bytes_ = std::move(peak_compute_bytes);
             session_.logged_segment_count_ = plan.segments.size();
         }
-        return true;
+        return PlanResult::Success;
     }
 
     ExecutionSession::ExecutionSession(ggml_backend_t backend, const std::shared_ptr<DeviceResidencyManager>& manager)

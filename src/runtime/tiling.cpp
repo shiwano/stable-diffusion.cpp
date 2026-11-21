@@ -111,29 +111,51 @@ static void sd_tensor_merge_2d(const sd::Tensor<float>& input,
     auto smootherstep_f32 = [](const float x) -> float {
         return x * x * x * (x * (6.0f * x - 15.0f) + 10.0f);
     };
-    for (int64_t plane = 0; plane < plane_count; ++plane) {
-        for (int iy = 0; iy < in_height; ++iy) {
-            float y_f = 1.0f;
+    std::vector<float> x_weights(in_width, 1.f);
+    for (int ix = 0; ix < in_width; ++ix) {
+        float f = 1.f;
+        if (ix < overlap_left) {
+            f = static_cast<float>(ix) / overlap_left;
+        }
+        if (ix >= in_width - overlap_right) {
+            f = static_cast<float>(in_width - ix) / overlap_right;
+        }
+        x_weights[ix] = smootherstep_f32(std::clamp(f, 0.f, 1.f));
+    }
+    sd::parallel_for(0, plane_count * in_height, std::max<int64_t>(1, 16384 / in_width), [&](int64_t begin, int64_t end) {
+        for (int64_t row = begin; row < end; ++row) {
+            const int64_t iy = row % in_height;
+            float y_f = 1.f;
             if (iy < overlap_top) {
                 y_f = static_cast<float>(iy) / overlap_top;
             }
             if (iy >= in_height - overlap_bottom) {
                 y_f = static_cast<float>(in_height - iy) / overlap_bottom;
             }
-            const float y_weight = smootherstep_f32(std::clamp(y_f, 0.0f, 1.0f));
-            for (int ix = 0; ix < in_width; ++ix) {
-                float x_f = 1.0f;
-                if (ix < overlap_left) {
-                    x_f = static_cast<float>(ix) / overlap_left;
+            const float y_weight = smootherstep_f32(std::clamp(y_f, 0.f, 1.f));
+            const float* src = input.data() + row * in_width;
+            float* dst_row = output->data() + (row / in_height) * out_size + ((y + iy) % out_height) * out_width;
+            for (int64_t start = 0; start < in_width;) {
+                const int64_t dx = (x + start) % out_width;
+                const int64_t stop = std::min(in_width, start + out_width - dx);
+                int64_t ix = start;
+                float* dst = dst_row + dx;
+                if (iy >= overlap_top && iy < in_height - overlap_bottom) {
+                    for (; ix < std::min<int64_t>(stop, overlap_left); ++ix) {
+                        *dst++ += x_weights[ix] * src[ix];
+                    }
+                    const int64_t middle_end = std::min(stop, in_width - overlap_right);
+                    for (; ix < middle_end; ++ix) {
+                        *dst++ += src[ix];
+                    }
                 }
-                if (ix >= in_width - overlap_right) {
-                    x_f = static_cast<float>(in_width - ix) / overlap_right;
+                for (; ix < stop; ++ix) {
+                    *dst++ += x_weights[ix] * y_weight * src[ix];
                 }
-                float x_weight = smootherstep_f32(std::clamp(x_f, 0.0f, 1.0f));
-                (*output)[plane * out_size + out_width * ((y + iy) % out_height) + ((x + ix) % out_width)] += x_weight * y_weight * input[plane * in_size + in_width * iy + ix];
+                start = stop;
             }
         }
-    }
+    });
 }
 
 sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& input,
